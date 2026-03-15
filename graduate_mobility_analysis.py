@@ -10,8 +10,10 @@ pattern differ between STEM and non-STEM fields?
 RUG MSc Economic Geography 2025-2026
 Supervised by dr. Femke Cnossen and dr. Viktor Venhorst
 
-Usage:
-    python graduate_mobility_analysis.py --data-dir "C:\\Users\\NL1E9O\\Downloads\\Regional Labour\\Input"
+Usage: Place this script in the same folder as your data files and run:
+    python graduate_mobility_analysis.py
+Or specify data directory:
+    python graduate_mobility_analysis.py --data-dir "C:\\path\\to\\data"
 """
 
 import argparse
@@ -20,12 +22,11 @@ import sys
 import warnings
 import glob as glob_module
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import numpy as np
 
-# Force UTF-8 output on Windows
+# Force UTF-8 output on Windows (fixes cp1252 crash)
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -42,9 +43,10 @@ except ImportError:
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ---------------------------------------------------------------------------
-# Configuration — file name mapping (actual names from your folder)
+# Configuration
 # ---------------------------------------------------------------------------
-# Maps logical name -> list of possible actual filenames to search for
+
+# Maps logical name -> list of possible filenames (tried in order)
 FILE_ALIASES = {
     "Inschrijvingen_WO": ["Inschrijvingen WO.csv", "Inschrijvingen_WO.csv"],
     "Inschrijvingen_HBO": ["Inschrijvingen HBO.csv", "Inschrijvingen_HBO.csv"],
@@ -52,11 +54,7 @@ FILE_ALIASES = {
     "Eerstejaars_HBO": ["Eerstejaars HBO.csv", "Eerstejaars_HBO.csv"],
     "Gediplomeerden_WO": ["Gediplomeerden WO.csv", "Gediplomeerden_WO.csv"],
     "Gediplomeerden_HBO": ["Gediplomeerden HBO.csv", "Gediplomeerden_HBO.csv"],
-    "Verhuisde_personen_regio": [
-        "Verhuisde_personen__binnen_gemeenten__tussen_gemeenten_en_vanuit_het_buitenland.csv",
-        "Verhuisde_personen_regio.csv",
-        "Verhuisde personen regio.csv",
-    ],
+    "Verhuisde_personen_regio": [],  # matched by partial name below
     "Vestigingen": [
         "Vestigingen_Bedrijven_Bedrijfstak.csv",
         "Vestigingen Bedrijven Bedrijfstak.csv",
@@ -72,27 +70,9 @@ FILE_ALIASES = {
     ],
 }
 
-# Tussen_gemeenten files are split by year
-TUSSEN_PATTERN = "Tussen_gemeenten_verhuisde_personen_*.csv"
-
 STEM_SECTORS_DUO = [
-    "TECHNIEK",
-    "NATUUR",
-    "LANDBOUW_EN_NATUURLIJKE_OMGEVING",
-    "LANDBOUW EN NATUURLIJKE OMGEVING",
-    "INFORMATICA",
-]
-
-NON_STEM_SECTORS_DUO = [
-    "ECONOMIE",
-    "GEDRAG_EN_MAATSCHAPPIJ",
-    "GEDRAG EN MAATSCHAPPIJ",
-    "GEZONDHEIDSZORG",
-    "ONDERWIJS",
-    "RECHT",
-    "TAAL_EN_CULTUUR",
-    "TAAL EN CULTUUR",
-    "SECTOROVERSTIJGEND",
+    "TECHNIEK", "NATUUR", "LANDBOUW_EN_NATUURLIJKE_OMGEVING",
+    "LANDBOUW EN NATUURLIJKE OMGEVING", "INFORMATICA",
 ]
 
 STEM_SBI = {
@@ -102,11 +82,24 @@ STEM_SBI = {
     "M": "Specialistische zakelijke diensten (R&D/Engineering)",
 }
 
+# LISA sector -> STEM classification
+LISA_STEM_SECTORS = {
+    "L02. Industrie": "C",
+    "L03. Nutsbedrijven": "D",
+    "L08. Informatie en Communicatie": "J",
+    "L10. Zakelijke diensten": "M",
+}
+
 DUTCH_PROVINCES = [
-    "Groningen", "Friesland", "Drenthe", "Overijssel", "Flevoland",
-    "Gelderland", "Utrecht", "Noord-Holland", "Zuid-Holland",
+    "Groningen", "Friesland", "Frysl\u00e2n", "Drenthe", "Overijssel",
+    "Flevoland", "Gelderland", "Utrecht", "Noord-Holland", "Zuid-Holland",
     "Zeeland", "Noord-Brabant", "Limburg",
 ]
+
+# Map LISA province names to standard names
+PROVINCE_NORMALIZE = {
+    "Frysl\u00e2n": "Friesland",
+}
 
 # Approximate province populations (2024)
 PROVINCE_POP = {
@@ -117,7 +110,7 @@ PROVINCE_POP = {
 }
 NL_TOTAL_POP = sum(PROVINCE_POP.values())
 
-# Municipality -> Province mapping (extended)
+# Extended gemeente -> province mapping
 GEMEENTE_PROVINCIE = {
     "Amsterdam": "Noord-Holland", "Rotterdam": "Zuid-Holland",
     "Den Haag": "Zuid-Holland", "'s-Gravenhage": "Zuid-Holland",
@@ -133,40 +126,33 @@ GEMEENTE_PROVINCIE = {
     "Middelburg": "Zeeland", "Lelystad": "Flevoland",
     "Emmen": "Drenthe", "Heerlen": "Limburg",
     "Venlo": "Limburg", "Deventer": "Overijssel",
-    "Leidschendam-Voorburg": "Zuid-Holland", "Zoetermeer": "Zuid-Holland",
-    "Dordrecht": "Zuid-Holland", "Hilversum": "Noord-Holland",
-    "Zaanstad": "Noord-Holland", "Haarlemmermeer": "Noord-Holland",
-    "Alphen aan den Rijn": "Zuid-Holland", "Roosendaal": "Noord-Brabant",
+    "Zoetermeer": "Zuid-Holland", "Dordrecht": "Zuid-Holland",
+    "Hilversum": "Noord-Holland", "Zaanstad": "Noord-Holland",
+    "Haarlemmermeer": "Noord-Holland", "Roosendaal": "Noord-Brabant",
     "Oss": "Noord-Brabant", "Helmond": "Noord-Brabant",
     "'s-Hertogenbosch": "Noord-Brabant", "Sittard-Geleen": "Limburg",
-    "Veenendaal": "Utrecht", "Ede": "Gelderland",
-    "Wageningen": "Gelderland", "Harderwijk": "Gelderland",
-    "Kampen": "Overijssel", "Hoogeveen": "Drenthe",
+    "Ede": "Gelderland", "Wageningen": "Gelderland",
+    "Almelo": "Overijssel", "Hengelo": "Overijssel",
+    "Gouda": "Zuid-Holland", "Alkmaar": "Noord-Holland",
+    "Bergen op Zoom": "Noord-Brabant", "Roermond": "Limburg",
+    "Leidschendam-Voorburg": "Zuid-Holland", "Capelle aan den IJssel": "Zuid-Holland",
+    "Vlaardingen": "Zuid-Holland", "Schiedam": "Zuid-Holland",
+    "Goes": "Zeeland", "Terneuzen": "Zeeland", "Vlissingen": "Zeeland",
+    "Dronten": "Flevoland", "Noordoostpolder": "Flevoland",
+    "Hoogeveen": "Drenthe", "Meppel": "Drenthe", "Coevorden": "Drenthe",
     "Stadskanaal": "Groningen", "Veendam": "Groningen",
-    "Delfzijl": "Groningen", "Winschoten": "Groningen",
     "Eemsdelta": "Groningen", "Midden-Groningen": "Groningen",
     "Westerkwartier": "Groningen", "Het Hogeland": "Groningen",
     "Oldambt": "Groningen", "Pekela": "Groningen",
     "Westerwolde": "Groningen",
     "Smallingerland": "Friesland", "Heerenveen": "Friesland",
-    "Sneek": "Friesland", "Sudwest-Fryslan": "Friesland",
-    "Noardeast-Fryslan": "Friesland",
-    "Meppel": "Drenthe", "Coevorden": "Drenthe",
-    "Almelo": "Overijssel", "Hengelo": "Overijssel",
-    "Hardenberg": "Overijssel",
-    "Doetinchem": "Gelderland", "Tiel": "Gelderland",
-    "Culemborg": "Gelderland", "Zutphen": "Gelderland",
-    "Zeist": "Utrecht", "Nieuwegein": "Utrecht",
-    "IJsselstein": "Utrecht", "Woerden": "Utrecht",
-    "Alkmaar": "Noord-Holland", "Hoorn": "Noord-Holland",
+    "S\u00fadwest-Frysl\u00e2n": "Friesland",
+    "Doetinchem": "Gelderland", "Zutphen": "Gelderland",
+    "Zeist": "Utrecht", "Nieuwegein": "Utrecht", "Woerden": "Utrecht",
     "Purmerend": "Noord-Holland", "Den Helder": "Noord-Holland",
-    "Gouda": "Zuid-Holland", "Vlaardingen": "Zuid-Holland",
-    "Schiedam": "Zuid-Holland", "Capelle aan den IJssel": "Zuid-Holland",
-    "Goes": "Zeeland", "Terneuzen": "Zeeland", "Vlissingen": "Zeeland",
-    "Bergen op Zoom": "Noord-Brabant", "Waalwijk": "Noord-Brabant",
-    "Uden": "Noord-Brabant", "Meierijstad": "Noord-Brabant",
-    "Roermond": "Limburg", "Weert": "Limburg", "Kerkrade": "Limburg",
-    "Dronten": "Flevoland", "Noordoostpolder": "Flevoland",
+    "Meierijstad": "Noord-Brabant", "Waalwijk": "Noord-Brabant",
+    "Weert": "Limburg", "Kerkrade": "Limburg",
+    "Hardenberg": "Overijssel", "Kampen": "Overijssel",
 }
 
 # ---------------------------------------------------------------------------
@@ -182,16 +168,18 @@ def note(msg):
 
 
 def find_file(data_dir, key):
-    """Find a file by its logical key, trying all aliases."""
+    """Find a file by logical key, trying aliases then partial match."""
     if key in FILE_ALIASES:
         for alias in FILE_ALIASES[key]:
             fp = os.path.join(data_dir, alias)
             if os.path.isfile(fp):
                 return fp
-    # Also try partial match on any file in the directory
+    # Partial match on any file in directory
     try:
+        key_words = key.lower().replace("_", " ").split()
         for fn in os.listdir(data_dir):
-            if key.lower().replace("_", " ") in fn.lower().replace("_", " "):
+            fn_lower = fn.lower().replace("_", " ")
+            if all(w in fn_lower for w in key_words):
                 return os.path.join(data_dir, fn)
     except Exception:
         pass
@@ -199,18 +187,17 @@ def find_file(data_dir, key):
 
 
 def find_tussen_files(data_dir):
-    """Find all Tussen_gemeenten files (split by year)."""
+    """Find all Tussen_gemeenten year files."""
     pattern = os.path.join(data_dir, "Tussen_gemeenten*verhuisde*personen*.csv")
     files = sorted(glob_module.glob(pattern))
     if not files:
-        # Try with spaces
         pattern = os.path.join(data_dir, "Tussen*gemeenten*verhuisde*personen*.csv")
         files = sorted(glob_module.glob(pattern))
     return files
 
 
 def load_csv(filepath, name="file"):
-    """Try loading a CSV with multiple separators and encodings."""
+    """Load CSV trying multiple encodings and separators."""
     for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
         for sep in [";", ",", "\t"]:
             try:
@@ -222,7 +209,7 @@ def load_csv(filepath, name="file"):
                     return df
             except Exception:
                 continue
-    # Try skipping header rows (CBS metadata)
+    # Try skipping CBS metadata headers
     for skip in [1, 2, 3, 4]:
         for enc in ["utf-8-sig", "latin-1"]:
             for sep in [";", ","]:
@@ -233,30 +220,24 @@ def load_csv(filepath, name="file"):
                         df.columns = df.columns.str.strip()
                         print(f"  [OK] Loaded {name}: {len(df)} rows x {len(df.columns)} cols "
                               f"(skipped {skip} header rows)")
-                        note(f"{name}: skipped {skip} metadata header rows")
                         return df
                 except Exception:
                     continue
-    print(f"  [ERROR] PARSE ERROR: {name}")
-    print(f"     Problem: Could not parse with any separator/encoding combination")
-    print(f"     Fix: Open in Excel -> Save As -> CSV UTF-8 (comma delimited)")
-    note(f"PARSE ERROR: {name} could not be loaded")
+    print(f"  [ERROR] Cannot parse {name}")
+    note(f"PARSE ERROR: {name}")
     return None
 
 
 def load_excel(filepath, name="file"):
-    """Load an Excel file."""
     try:
-        # Try reading all sheets
         xls = pd.ExcelFile(filepath)
-        print(f"  [OK] Excel file {name} has sheets: {xls.sheet_names}")
+        print(f"  [OK] Excel {name}: sheets = {xls.sheet_names}")
         df = pd.read_excel(filepath, sheet_name=0)
         df.columns = df.columns.str.strip()
-        print(f"  [OK] Loaded {name} (sheet '{xls.sheet_names[0]}'): "
-              f"{len(df)} rows x {len(df.columns)} cols")
+        print(f"  [OK] Loaded {name}: {len(df)} rows x {len(df.columns)} cols")
         return df
     except Exception as e:
-        print(f"  [ERROR] PARSE ERROR: {name}: {e}")
+        print(f"  [ERROR] {name}: {e}")
         note(f"PARSE ERROR: {name}: {e}")
         return None
 
@@ -265,18 +246,16 @@ def clean_numeric(series):
     """Clean Dutch-formatted numbers."""
     if series.dtype == object:
         s = series.astype(str).str.strip()
-        s = s.replace({"": np.nan, ".": np.nan, "-": np.nan, "x": np.nan, "X": np.nan})
+        s = s.replace({"": np.nan, ".": np.nan, "-": np.nan, "x": np.nan})
         if s.str.contains(",", na=False).any():
             s = s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
-        else:
-            if s.str.match(r"^\d{1,3}(\.\d{3})+$", na=False).any():
-                s = s.str.replace(".", "", regex=False)
+        elif s.str.match(r"^\d{1,3}(\.\d{3})+$", na=False).any():
+            s = s.str.replace(".", "", regex=False)
         return pd.to_numeric(s, errors="coerce")
     return pd.to_numeric(series, errors="coerce")
 
 
 def inspect_df(df, name):
-    """Print inspection details."""
     print(f"\n  --- {name} ---")
     print(f"  Shape: {df.shape[0]} rows x {df.shape[1]} columns")
     print(f"  Columns: {list(df.columns)}")
@@ -284,17 +263,16 @@ def inspect_df(df, name):
         cl = col.lower()
         if any(kw in cl for kw in ["regio", "sector", "jaar", "year", "opleiding",
                                      "onderdeel", "provincie", "instelling",
-                                     "geslacht", "bedrijfstak", "gemeente"]):
+                                     "geslacht", "bedrijfstak", "gemeente",
+                                     "lisa_sector", "corop"]):
             nuniq = df[col].nunique()
             if nuniq <= 30:
-                vals = sorted(df[col].dropna().unique(), key=str)
-                print(f"  {col} ({nuniq} unique): {vals}")
+                print(f"  {col} ({nuniq}): {sorted(df[col].dropna().unique(), key=str)}")
             else:
-                print(f"  {col} ({nuniq} unique values)")
+                print(f"  {col}: {nuniq} unique values")
 
 
 def find_column(df, candidates, partial=True):
-    """Find first matching column from candidates list."""
     cols_upper = {c.upper().strip(): c for c in df.columns}
     for cand in candidates:
         cu = cand.upper().strip()
@@ -308,7 +286,6 @@ def find_column(df, candidates, partial=True):
 
 
 def is_stem_duo(sector_val):
-    """Check if a DUO sector value is STEM."""
     if pd.isna(sector_val):
         return False
     s = str(sector_val).upper().strip()
@@ -319,19 +296,14 @@ def is_stem_duo(sector_val):
 
 
 def fmt_pct(val):
-    if pd.isna(val):
-        return "N/A"
-    return f"{val:.1f}%"
+    return f"{val:.1f}%" if not pd.isna(val) else "N/A"
 
 
 def fmt_num(val):
-    if pd.isna(val):
-        return "N/A"
-    return f"{val:,.0f}".replace(",", ".")
+    return f"{val:,.0f}".replace(",", ".") if not pd.isna(val) else "N/A"
 
 
 def safe_open(filepath, mode="w"):
-    """Open file with UTF-8 encoding (avoids Windows cp1252 errors)."""
     return open(filepath, mode, encoding="utf-8")
 
 
@@ -351,63 +323,52 @@ def step0_file_check(data_dir):
     print("=" * 60)
 
     found = {}
-
     for key in FILE_ALIASES:
         fp = find_file(data_dir, key)
         if fp:
-            fn = os.path.basename(fp)
-            print(f"  [FOUND]   {key} -> {fn}")
+            print(f"  [FOUND]   {key} -> {os.path.basename(fp)}")
             found[key] = fp
         else:
             print(f"  [MISSING] {key}")
 
-    # Check Tussen files (split by year)
     tussen_files = find_tussen_files(data_dir)
     if tussen_files:
-        print(f"  [FOUND]   Tussen_gemeenten -> {len(tussen_files)} year files:")
-        for tf in tussen_files:
-            print(f"            {os.path.basename(tf)}")
+        print(f"  [FOUND]   Tussen_gemeenten -> {len(tussen_files)} year files")
         found["Tussen"] = tussen_files
     else:
-        print(f"  [MISSING] Tussen_gemeenten_verhuisde_personen files")
+        print(f"  [MISSING] Tussen_gemeenten files")
 
-    missing_keys = [k for k in FILE_ALIASES if k not in found]
+    missing = [k for k in FILE_ALIASES if k not in found]
     if "Tussen" not in found:
-        missing_keys.append("Tussen")
+        missing.append("Tussen")
 
-    if missing_keys:
-        print("\n  === WHAT TO DO FOR MISSING FILES ===")
+    if missing:
+        print("\n  === DOWNLOAD INSTRUCTIONS FOR MISSING FILES ===")
         instructions = {
             "Verhuisde_personen_regio": (
-                "-> CBS StatLine: search '60048ned'\n"
-                "     -> Select Gemeente = Groningen, all years, all age groups -> Download CSV"
-            ),
+                "CBS StatLine: search '60048ned' -> Gemeente = Groningen, "
+                "all years, all age groups -> Download CSV"),
             "Vestigingen": (
-                "-> CBS StatLine -> dataset 81589NED\n"
-                "     -> Select ALL provinces, all SBI sectors -> Download CSV"
-            ),
-            "LISA": "-> Obtain from course materials or LISA",
+                "CBS StatLine -> 81589NED -> ALL provinces, all SBI -> Download CSV"),
+            "LISA": "Obtain from course materials or LISA",
             "Tussen": (
-                "-> CBS StatLine -> table 81734NED\n"
-                "     -> Gemeente van vertrek = Groningen, all destinations, all years -> Download CSV"
-            ),
+                "CBS StatLine -> 81734NED -> Gemeente vertrek = Groningen, "
+                "ALL destination municipalities, all years -> Download CSV"),
             "OCW": (
-                "-> ocwincijfers.nl -> Hoger Onderwijs -> Onderwijs en Arbeidsmarkt\n"
-                "     -> 'Arbeidsmarktkenmerken uitstromers WO' -> download CSV"
-            ),
+                "ocwincijfers.nl -> Hoger Onderwijs -> Arbeidsmarkt -> "
+                "'Arbeidsmarktkenmerken uitstromers WO' -> CSV"),
         }
-        for k in missing_keys:
+        for k in missing:
             if k in instructions:
-                print(f"\n  [MISSING] {k}")
-                print(f"     {instructions[k]}")
+                print(f"  {k}: {instructions[k]}")
 
-    return found, missing_keys
+    return found, missing
 
 
 # ---------------------------------------------------------------------------
 # STEP 1: Inspect
 # ---------------------------------------------------------------------------
-def step1_inspect(found, data_dir):
+def step1_inspect(found):
     print("\n" + "=" * 60)
     print("=== STEP 1: INSPECT ALL FILES ===")
     print("=" * 60)
@@ -415,15 +376,13 @@ def step1_inspect(found, data_dir):
     loaded = {}
     for key, fp in found.items():
         if key == "Tussen":
-            # Multiple files — load and concat
+            # Multiple year files -> load and concat
             dfs = []
             for tf in fp:
                 df = load_csv(tf, os.path.basename(tf))
                 if df is not None:
-                    # Extract year from filename
-                    bn = os.path.basename(tf)
-                    for y in ["2021", "2022", "2023", "2024", "2020", "2019"]:
-                        if y in bn:
+                    for y in ["2019", "2020", "2021", "2022", "2023", "2024"]:
+                        if y in os.path.basename(tf):
                             df["FILE_YEAR"] = int(y)
                             break
                     dfs.append(df)
@@ -441,7 +400,6 @@ def step1_inspect(found, data_dir):
             if df is not None:
                 loaded[key] = df
                 inspect_df(df, key)
-                df.replace({"": np.nan, ".": np.nan}, inplace=True)
 
     return loaded
 
@@ -451,15 +409,18 @@ def step1_inspect(found, data_dir):
 # ---------------------------------------------------------------------------
 def step2_stem_classification():
     print("\n" + "=" * 60)
-    print("=== STEP 2: STEM CLASSIFICATION APPLIED ===")
+    print("=== STEP 2: STEM CLASSIFICATION ===")
     print("=" * 60)
-    print(f"  DUO sectors classified as STEM: {', '.join(STEM_SECTORS_DUO)}")
-    print(f"  SBI sectors classified as STEM:")
+    print(f"  DUO sectors -> STEM: {', '.join(STEM_SECTORS_DUO)}")
+    print(f"  SBI sectors -> STEM:")
     for k, v in STEM_SBI.items():
         print(f"    {k}: {v}")
-    print(f"  Non-STEM reference: ECONOMIE, GEDRAG_EN_MAATSCHAPPIJ, GEZONDHEIDSZORG, ONDERWIJS")
-    print(f"  Note: SBI sector M includes consultancy and R&D -- included but flagged")
-    note("SBI sector M includes both R&D/Engineering and management consultancy")
+    print(f"  LISA sectors -> STEM:")
+    for k, v in LISA_STEM_SECTORS.items():
+        print(f"    {k} -> SBI {v}")
+    print(f"  Non-STEM ref: ECONOMIE, GEDRAG_EN_MAATSCHAPPIJ, GEZONDHEIDSZORG, ONDERWIJS")
+    print(f"  Note: SBI M / LISA L10 includes consultancy alongside R&D -- flagged")
+    note("SBI sector M / LISA L10 includes consultancy and R&D")
 
 
 # ---------------------------------------------------------------------------
@@ -475,210 +436,189 @@ def step3_analysis_a(loaded, out_dir):
     for level in ["WO", "HBO"]:
         grad_key = f"Gediplomeerden_{level}"
         eerst_key = f"Eerstejaars_{level}"
-
         grad_df = loaded.get(grad_key)
         eerst_df = loaded.get(eerst_key)
 
         if grad_df is None:
-            print(f"\n  [SKIP] {grad_key} not loaded -- skipping {level} graduate analysis")
+            print(f"\n  [SKIP] {grad_key} not loaded")
             continue
 
-        print(f"\n  --- Processing {grad_key} ---")
+        print(f"\n  --- {grad_key} ---")
 
-        # A1: Filter for Groningen institutions
-        inst_col = find_column(grad_df, ["INSTELLINGSNAAM", "INSTELLING", "INSTELLINGNAAM",
-                                          "INSTELLINGSNAAM ACTUEEL"])
-        prov_col = find_column(grad_df, ["PROVINCIENAAM", "PROVINCIE",
-                                          "PROVINCIE INSTELLING"])
+        # A1: Filter for Groningen
+        # Column is INSTELLINGSNAAM_ACTUEEL based on actual data
+        inst_col = find_column(grad_df, ["INSTELLINGSNAAM_ACTUEEL", "INSTELLINGSNAAM"])
+        prov_col = find_column(grad_df, ["PROVINCIENAAM", "PROVINCIE"])
 
-        groningen_filter = None
         if inst_col:
-            groningen_filter = grad_df[inst_col].astype(str).str.upper().str.contains(
+            gron_filter = grad_df[inst_col].astype(str).str.upper().str.contains(
                 "GRONINGEN|RUG|RIJKSUNIVERSITEIT|HANZE", na=False)
-            n_match = groningen_filter.sum()
-            print(f"  Filtering on {inst_col}: {n_match}/{len(grad_df)} rows match Groningen")
+            print(f"  Filtering {inst_col}: {gron_filter.sum()}/{len(grad_df)} Groningen rows")
         elif prov_col:
-            groningen_filter = grad_df[prov_col].astype(str).str.upper().str.contains(
+            gron_filter = grad_df[prov_col].astype(str).str.upper().str.contains(
                 "GRONINGEN", na=False)
-            n_match = groningen_filter.sum()
-            print(f"  Filtering on {prov_col}: {n_match}/{len(grad_df)} rows match Groningen")
+            print(f"  Filtering {prov_col}: {gron_filter.sum()}/{len(grad_df)} Groningen rows")
         else:
-            print(f"  [WARNING] Cannot filter on Groningen -- no institution/province column")
-            print(f"     Columns present: {list(grad_df.columns)}")
-            note(f"{grad_key}: no institution/province column, using full dataset")
-            groningen_filter = pd.Series(True, index=grad_df.index)
+            print(f"  [WARNING] No institution/province column -- using full dataset")
+            gron_filter = pd.Series(True, index=grad_df.index)
 
-        gdf = grad_df[groningen_filter].copy()
-
+        gdf = grad_df[gron_filter].copy()
         if len(gdf) == 0:
-            print(f"  [WARNING] No Groningen rows after filtering -- check column values")
-            if inst_col:
-                print(f"  Sample values in {inst_col}: {grad_df[inst_col].unique()[:10]}")
+            print(f"  [WARNING] No Groningen rows found")
             continue
 
-        # Find sector and year columns
-        sector_col = find_column(gdf, ["CROHO ONDERDEEL", "ONDERDEEL", "SECTOR",
-                                        "CROHO_ONDERDEEL", "ISCED"])
-        year_col = find_column(gdf, ["JAAR", "YEAR", "ACADEMIEJAAR",
-                                      "COLLEGEJAAR", "JAAR/YEAR"])
+        # Columns: ONDERDEEL (sector), DIPLOMAJAAR (year), AANTAL_GEDIPLOMEERDEN (count)
+        sector_col = "ONDERDEEL"  # known from data inspection
+        year_col = find_column(gdf, ["DIPLOMAJAAR", "STUDIEJAAR", "JAAR"])
+        count_col = find_column(gdf, ["AANTAL_GEDIPLOMEERDEN", "AANTAL"])
 
-        # Find count columns -- DUO files typically have MAN and VROUW
-        man_col = find_column(gdf, ["MAN", "MANNEN"])
-        vrouw_col = find_column(gdf, ["VROUW", "VROUWEN"])
-        total_col = find_column(gdf, ["TOTAAL", "AANTAL", "GEDIPLOMEERDEN",
-                                       "TOTAAL GEDIPLOMEERDEN"])
+        # Check for gender column (Gediplomeerden may have GESLACHT)
+        gender_col = find_column(gdf, ["GESLACHT"])
 
+        if sector_col not in gdf.columns:
+            sector_col = find_column(gdf, ["ONDERDEEL", "SECTOR", "CROHO ONDERDEEL"])
         if sector_col is None:
-            print(f"  [WARNING] No sector column found in {grad_key}")
-            print(f"     Columns: {list(gdf.columns)}")
-            note(f"{grad_key}: no sector column -- cannot classify STEM/non-STEM")
+            print(f"  [WARNING] No sector column")
             continue
 
-        print(f"  Sector column: {sector_col}")
-        print(f"  Year column: {year_col}")
-        print(f"  Unique sectors: {sorted(gdf[sector_col].dropna().unique(), key=str)}")
-
-        # Classify STEM
+        print(f"  Sectors: {sorted(gdf[sector_col].unique())}")
         gdf["IS_STEM"] = gdf[sector_col].apply(is_stem_duo)
-        stem_count = gdf["IS_STEM"].sum()
-        print(f"  STEM rows: {stem_count} / {len(gdf)}")
-
-        # Build COUNT column
-        if man_col and vrouw_col:
-            gdf["MEN_COUNT"] = clean_numeric(gdf[man_col])
-            gdf["WOMEN_COUNT"] = clean_numeric(gdf[vrouw_col])
-            gdf["COUNT"] = gdf["MEN_COUNT"].fillna(0) + gdf["WOMEN_COUNT"].fillna(0)
-            print(f"  Count = {man_col} + {vrouw_col}")
-        elif total_col:
-            gdf["COUNT"] = clean_numeric(gdf[total_col])
-            print(f"  Count column: {total_col}")
-        else:
-            gdf["COUNT"] = 1
-            note(f"{grad_key}: no count column found, treating each row as 1")
+        gdf["COUNT"] = clean_numeric(gdf[count_col]) if count_col else 1
+        print(f"  STEM rows: {gdf['IS_STEM'].sum()}/{len(gdf)}")
 
         # A2: Annual STEM graduates
         if year_col:
-            stem_yearly = gdf[gdf["IS_STEM"]].groupby(year_col)["COUNT"].sum()
-            nonstem_yearly = gdf[~gdf["IS_STEM"]].groupby(year_col)["COUNT"].sum()
-
+            stem_yr = gdf[gdf["IS_STEM"]].groupby(year_col)["COUNT"].sum()
+            nonstem_yr = gdf[~gdf["IS_STEM"]].groupby(year_col)["COUNT"].sum()
             yearly = pd.DataFrame({
-                f"{level}_STEM_GRADS": stem_yearly,
-                f"{level}_NONSTEM_GRADS": nonstem_yearly,
+                f"{level}_STEM_GRADS": stem_yr,
+                f"{level}_NONSTEM_GRADS": nonstem_yr,
             }).fillna(0)
             total = yearly[f"{level}_STEM_GRADS"] + yearly[f"{level}_NONSTEM_GRADS"]
             yearly[f"{level}_STEM_PCT"] = (yearly[f"{level}_STEM_GRADS"] / total * 100).round(1)
             yearly.index.name = "YEAR"
-
             results_a[f"{level}_yearly"] = yearly
             print(f"\n  {level} annual STEM graduates:")
             print(yearly.to_string())
-        else:
-            print(f"  [WARNING] No year column -- cannot produce time series")
 
-        # A3: Gender breakdown (latest year)
-        if man_col and vrouw_col and year_col:
+        # A3: Gender breakdown
+        if gender_col and year_col:
             latest_year = gdf[year_col].max()
-            latest = gdf[gdf[year_col] == latest_year].copy()
-            gender_summary = latest.groupby(sector_col).agg(
-                MEN=("MEN_COUNT", "sum"),
-                WOMEN=("WOMEN_COUNT", "sum"),
-            ).reset_index()
-            gender_summary["PCT_WOMEN"] = (
-                gender_summary["WOMEN"] /
-                (gender_summary["MEN"] + gender_summary["WOMEN"]) * 100
-            ).round(1)
-            gender_summary.insert(0, "YEAR", latest_year)
-            results_a[f"{level}_gender"] = gender_summary
-            print(f"\n  {level} gender breakdown ({latest_year}):")
-            print(gender_summary.to_string(index=False))
+            latest = gdf[gdf[year_col] == latest_year]
+            gender_tbl = latest.groupby([sector_col, gender_col])["COUNT"].sum().unstack(fill_value=0)
+            if "MAN" in gender_tbl.columns and "VROUW" in gender_tbl.columns:
+                gender_tbl["PCT_WOMEN"] = (
+                    gender_tbl["VROUW"] /
+                    (gender_tbl["MAN"] + gender_tbl["VROUW"]) * 100
+                ).round(1)
+                gender_tbl.insert(0, "YEAR", latest_year)
+                results_a[f"{level}_gender"] = gender_tbl
+                print(f"\n  {level} gender breakdown ({latest_year}):")
+                print(gender_tbl.to_string())
+            else:
+                print(f"  Gender values: {list(gender_tbl.columns)} -- no MAN/VROUW split")
+        elif not gender_col:
+            # No GESLACHT column in Gediplomeerden -- check Inschrijvingen instead
+            insch_key = f"Inschrijvingen_{level}"
+            insch_df = loaded.get(insch_key)
+            if insch_df is not None:
+                i_inst = find_column(insch_df, ["INSTELLINGSNAAM_ACTUEEL", "INSTELLINGSNAAM"])
+                i_gender = find_column(insch_df, ["GESLACHT"])
+                i_count = find_column(insch_df, ["AANTAL_INGESCHREVENEN", "AANTAL"])
+                i_year = find_column(insch_df, ["STUDIEJAAR", "JAAR"])
+                if i_inst and i_gender and i_count and i_year:
+                    i_gron = insch_df[insch_df[i_inst].astype(str).str.upper().str.contains(
+                        "GRONINGEN|RUG|RIJKSUNIVERSITEIT|HANZE", na=False)].copy()
+                    i_gron["IS_STEM"] = i_gron[sector_col].apply(is_stem_duo) if sector_col in i_gron.columns else False
+                    i_gron["COUNT"] = clean_numeric(i_gron[i_count])
+                    latest_yr = i_gron[i_year].max()
+                    lat = i_gron[i_gron[i_year] == latest_yr]
+                    g_tbl = lat.groupby([sector_col, i_gender])["COUNT"].sum().unstack(fill_value=0)
+                    if "MAN" in g_tbl.columns and "VROUW" in g_tbl.columns:
+                        g_tbl["PCT_WOMEN"] = (
+                            g_tbl["VROUW"] / (g_tbl["MAN"] + g_tbl["VROUW"]) * 100
+                        ).round(1)
+                        g_tbl.insert(0, "YEAR", latest_yr)
+                        results_a[f"{level}_gender_inschrijvingen"] = g_tbl
+                        print(f"\n  {level} gender breakdown from Inschrijvingen ({latest_yr}):")
+                        print(g_tbl.to_string())
 
         # A4: Pipeline leakage
         if eerst_df is not None and year_col:
-            print(f"\n  --- Pipeline leakage: {eerst_key} vs {grad_key} ---")
-            # Apply same Groningen filter
-            e_inst_col = find_column(eerst_df, ["INSTELLINGSNAAM", "INSTELLING",
-                                                  "INSTELLINGSNAAM ACTUEEL"])
-            e_prov_col = find_column(eerst_df, ["PROVINCIENAAM", "PROVINCIE"])
-            if e_inst_col:
-                e_filter = eerst_df[e_inst_col].astype(str).str.upper().str.contains(
-                    "GRONINGEN|RUG|RIJKSUNIVERSITEIT|HANZE", na=False)
-            elif e_prov_col:
-                e_filter = eerst_df[e_prov_col].astype(str).str.upper().str.contains(
-                    "GRONINGEN", na=False)
+            print(f"\n  --- Pipeline leakage ---")
+            e_inst = find_column(eerst_df, ["INSTELLINGSNAAM_ACTUEEL", "INSTELLINGSNAAM"])
+            if e_inst:
+                e_gron = eerst_df[eerst_df[e_inst].astype(str).str.upper().str.contains(
+                    "GRONINGEN|RUG|RIJKSUNIVERSITEIT|HANZE", na=False)].copy()
             else:
-                e_filter = pd.Series(True, index=eerst_df.index)
+                e_gron = eerst_df.copy()
 
-            edf = eerst_df[e_filter].copy()
-            e_sector_col = find_column(edf, ["CROHO ONDERDEEL", "ONDERDEEL", "SECTOR"])
-            e_year_col = find_column(edf, ["JAAR", "YEAR", "ACADEMIEJAAR", "COLLEGEJAAR"])
-            e_man = find_column(edf, ["MAN", "MANNEN"])
-            e_vrouw = find_column(edf, ["VROUW", "VROUWEN"])
-            e_total = find_column(edf, ["TOTAAL", "AANTAL", "EERSTEJAARS"])
+            e_sector = find_column(e_gron, ["ONDERDEEL", "SECTOR"])
+            e_year = find_column(e_gron, ["STUDIEJAAR", "JAAR"])
+            e_count = find_column(e_gron, ["AANTAL_EERSTEJAARS_INGESCHREVENEN", "AANTAL"])
 
-            if e_sector_col and e_year_col:
-                edf["IS_STEM"] = edf[e_sector_col].apply(is_stem_duo)
-                if e_man and e_vrouw:
-                    edf["COUNT"] = clean_numeric(edf[e_man]).fillna(0) + clean_numeric(edf[e_vrouw]).fillna(0)
-                elif e_total:
-                    edf["COUNT"] = clean_numeric(edf[e_total])
+            if e_sector and e_year and e_count:
+                e_gron["IS_STEM"] = e_gron[e_sector].apply(is_stem_duo)
+                e_gron["COUNT"] = clean_numeric(e_gron[e_count])
+                e_stem = e_gron[e_gron["IS_STEM"]].groupby(e_year)["COUNT"].sum()
+                g_stem = gdf[gdf["IS_STEM"]].groupby(year_col)["COUNT"].sum()
+
+                # The year columns are: Eerstejaars STUDIEJAAR 2020-2024
+                # Gediplomeerden DIPLOMAJAAR 2019-2023
+                # Try offsets of 3 and 4 years
+                print(f"  First-year years: {sorted(e_stem.index)}")
+                print(f"  Graduate years: {sorted(g_stem.index)}")
+
+                for offset in [4, 3, 5]:
+                    leakage_rows = []
+                    for yr in e_stem.index:
+                        grad_yr = yr + offset
+                        if grad_yr in g_stem.index:
+                            e_val = e_stem[yr]
+                            g_val = g_stem[grad_yr]
+                            if e_val > 0:
+                                leakage_rows.append({
+                                    "FIRST_YEAR_COHORT": yr,
+                                    "GRAD_YEAR": grad_yr,
+                                    "OFFSET_YEARS": offset,
+                                    "STEM_FIRST_YEARS": e_val,
+                                    "STEM_GRADUATES": g_val,
+                                    "DROPOUT_PCT": round((e_val - g_val) / e_val * 100, 1),
+                                })
+                    if leakage_rows:
+                        leak_df = pd.DataFrame(leakage_rows)
+                        results_a[f"{level}_leakage"] = leak_df
+                        print(f"\n  {level} pipeline leakage (offset={offset}):")
+                        print(leak_df.to_string(index=False))
+                        print("  Note: Upper bound estimate. Cohort tracking needs CBS microdata.")
+                        break
                 else:
-                    edf["COUNT"] = 1
-
-                e_yearly = edf[edf["IS_STEM"]].groupby(e_year_col)["COUNT"].sum()
-                g_yearly = gdf[gdf["IS_STEM"]].groupby(year_col)["COUNT"].sum()
-
-                offset = 4
-                leakage_rows = []
-                for yr in e_yearly.index:
-                    try:
-                        grad_yr = int(yr) + offset
-                    except (ValueError, TypeError):
-                        continue
-                    # Check both int and string versions
-                    g_val = None
-                    for candidate in [grad_yr, str(grad_yr)]:
-                        if candidate in g_yearly.index:
-                            g_val = g_yearly[candidate]
-                            break
-                    if g_val is not None:
-                        e_val = e_yearly[yr]
-                        if e_val > 0:
-                            dropout = (e_val - g_val) / e_val * 100
-                            leakage_rows.append({
-                                "FIRST_YEAR_COHORT": yr,
-                                "GRAD_YEAR": grad_yr,
-                                "STEM_FIRST_YEARS": e_val,
-                                "STEM_GRADUATES": g_val,
-                                "DROPOUT_PCT": round(dropout, 1),
-                            })
-
-                if leakage_rows:
-                    leak_df = pd.DataFrame(leakage_rows)
-                    results_a[f"{level}_leakage"] = leak_df
-                    print(f"\n  {level} pipeline leakage:")
-                    print(leak_df.to_string(index=False))
-                    print("\n  Note: Upper bound estimate. Actual cohort tracking requires "
-                          "CBS microdata.")
-                else:
-                    print(f"  [INFO] No matching cohort years for {offset}-year offset")
-                    print(f"  First-year years: {sorted(e_yearly.index)}")
-                    print(f"  Graduate years: {sorted(g_yearly.index)}")
+                    # No offset works -- show descriptive comparison
+                    print(f"  No overlapping years with standard offsets.")
+                    print(f"  Descriptive comparison (latest available):")
+                    if len(e_stem) > 0 and len(g_stem) > 0:
+                        print(f"    First-years STEM ({e_stem.index[-1]}): {e_stem.iloc[-1]:.0f}")
+                        print(f"    Graduates STEM ({g_stem.index[-1]}): {g_stem.iloc[-1]:.0f}")
+                        results_a[f"{level}_pipeline_descriptive"] = pd.DataFrame({
+                            "Metric": ["First-year STEM (latest)", "Graduate STEM (latest)"],
+                            "Year": [e_stem.index[-1], g_stem.index[-1]],
+                            "Count": [e_stem.iloc[-1], g_stem.iloc[-1]],
+                        })
 
     # Save
     output_path = os.path.join(out_dir, "output_A_stem_pipeline_groningen.csv")
     with safe_open(output_path) as f:
-        write_csv_header(f, "DUO Gediplomeerden WO/HBO, Eerstejaars WO/HBO",
-                         "Groningen institutions only; STEM classification as defined in Step 2")
+        write_csv_header(f, "DUO Gediplomeerden/Eerstejaars WO+HBO",
+                         "Groningen institutions only")
         for key, df in results_a.items():
             f.write(f"\n# {key}\n")
             df.to_csv(f)
-    print(f"\n  [OK] Step 3 complete -- saved to {output_path}")
-
+    print(f"\n  [OK] Step 3 complete -> {output_path}")
     return results_a
 
 
 # ---------------------------------------------------------------------------
-# STEP 4: Analysis B -- Regional Industrial Structure
+# STEP 4: Analysis B -- Regional Industrial Structure (using LISA)
 # ---------------------------------------------------------------------------
 def step4_analysis_b(loaded, out_dir):
     print("\n" + "=" * 60)
@@ -687,176 +627,214 @@ def step4_analysis_b(loaded, out_dir):
 
     results_b = {}
 
-    vest_df = loaded.get("Vestigingen")
-    if vest_df is None:
-        print(f"  [SKIP] Vestigingen not loaded -- skipping LQ analysis")
-        note("Location Quotient analysis skipped: Vestigingen file not available")
-    else:
-        print(f"\n  --- B1: Inspecting Vestigingen ---")
-
-        regio_col = find_column(vest_df, ["REGIO", "REGIO'S", "REGIOS", "Regio's",
-                                           "PROVINCIE", "COROP"])
-        sector_col = find_column(vest_df, ["BEDRIJFSTAK", "BEDRIJFSTAKKEN",
-                                            "Bedrijfstakken/branches SBI 2008",
-                                            "Bedrijfstakken", "SBI", "BRANCHE"])
-        count_col = find_column(vest_df, ["VESTIGINGEN", "AANTAL", "TOTAAL",
-                                           "Vestigingen", "Bedrijven",
-                                           "Totaal vestigingen"])
-
-        if regio_col:
-            regions = vest_df[regio_col].dropna().unique()
-            print(f"  Region column: {regio_col}")
-            print(f"  Regions ({len(regions)}): {sorted(regions, key=str)[:25]}")
-
-            # Check provinces
-            regions_upper = set(str(r).upper().strip() for r in regions)
-            provinces_found = []
-            for prov in DUTCH_PROVINCES:
-                if any(prov.upper() in r for r in regions_upper):
-                    provinces_found.append(prov)
-
-            if len(provinces_found) < 6:
-                print(f"\n  [INCOMPLETE] Only {len(provinces_found)} provinces found: {provinces_found}")
-                print(f"     For LQ analysis you need ALL provinces.")
-                print(f"     -> CBS StatLine -> dataset 81589NED -> Select ALL provinces")
-                print(f"     Running Groningen-only descriptives instead.")
-                note("LQ analysis incomplete: not all provinces in Vestigingen file")
-
-                if sector_col and count_col:
-                    gron_mask = vest_df[regio_col].astype(str).str.upper().str.contains(
-                        "GRONINGEN", na=False)
-                    gron = vest_df[gron_mask].copy()
-                    gron["COUNT"] = clean_numeric(gron[count_col])
-                    sector_summary = gron.groupby(sector_col)["COUNT"].sum().sort_values(ascending=False)
-                    print(f"\n  Groningen establishments by sector:")
-                    print(sector_summary.to_string())
-                    results_b["groningen_sectors"] = sector_summary
-            else:
-                print(f"  [OK] Provinces present: {provinces_found}")
-
-                if sector_col and count_col:
-                    vest_df["COUNT"] = clean_numeric(vest_df[count_col])
-
-                    sectors = vest_df[sector_col].dropna().unique()
-                    print(f"\n  Sector column: {sector_col}")
-                    print(f"  Sectors ({len(sectors)}):")
-                    for s in sorted(sectors, key=str):
-                        print(f"    {s}")
-
-                    def classify_sbi_stem(sector_name):
-                        s = str(sector_name).upper()
-                        if any(kw in s for kw in ["INDUSTRIE", "MAAKINDUSTRIE", "NIJVERHEID"]):
-                            if "VOEDINGS" not in s:
-                                return "C"
-                        if any(kw in s for kw in ["ENERGIE", "ELECTRICITEIT", "GAS"]):
-                            return "D"
-                        if any(kw in s for kw in ["INFORMATIE", "COMMUNICATIE", "ICT"]):
-                            return "J"
-                        if any(kw in s for kw in ["SPECIALISTISCH", "ZAKELIJK", "ADVIES",
-                                                    "TECHNISCH", "WETENSCHAPPELIJK", "RESEARCH"]):
-                            return "M"
-                        return "OTHER"
-
-                    vest_df["SBI_GROUP"] = vest_df[sector_col].apply(classify_sbi_stem)
-
-                    # Show SBI mapping
-                    print(f"\n  SBI classification applied:")
-                    for sbi in ["C", "D", "J", "M"]:
-                        mapped = vest_df[vest_df["SBI_GROUP"] == sbi][sector_col].unique()
-                        if len(mapped) > 0:
-                            print(f"    {sbi}: {list(mapped)}")
-
-                    # LQ calculation
-                    lq_rows = []
-                    for region in vest_df[regio_col].dropna().unique():
-                        region_data = vest_df[vest_df[regio_col] == region]
-                        total_region = region_data["COUNT"].sum()
-                        if total_region == 0 or pd.isna(total_region):
-                            continue
-
-                        total_national = vest_df["COUNT"].sum()
-                        row = {"REGION": str(region).strip()}
-
-                        for sbi_code, col_name in [("C", "LQ_Industrie_C"),
-                                                     ("J", "LQ_ICT_J"),
-                                                     ("M", "LQ_Zakelijk_M")]:
-                            sector_region = region_data[
-                                region_data["SBI_GROUP"] == sbi_code]["COUNT"].sum()
-                            sector_national = vest_df[
-                                vest_df["SBI_GROUP"] == sbi_code]["COUNT"].sum()
-
-                            if total_national > 0 and sector_national > 0:
-                                lq = ((sector_region / total_region) /
-                                      (sector_national / total_national))
-                                row[col_name] = round(lq, 2)
-                            else:
-                                row[col_name] = np.nan
-
-                        lq_rows.append(row)
-
-                    if lq_rows:
-                        lq_df = pd.DataFrame(lq_rows)
-                        lq_cols = [c for c in lq_df.columns if c.startswith("LQ_")]
-                        lq_df["STEM_LQ_COMPOSITE"] = lq_df[lq_cols].mean(axis=1).round(2)
-                        lq_df = lq_df.sort_values("STEM_LQ_COMPOSITE",
-                                                    ascending=False).reset_index(drop=True)
-                        lq_df.index += 1
-                        lq_df.index.name = "RANK"
-
-                        results_b["lq"] = lq_df
-                        print(f"\n  Location Quotients (ranked):")
-                        print(lq_df.to_string())
-
-                        gron_rows = lq_df[lq_df["REGION"].str.upper().str.contains("GRONINGEN")]
-                        if len(gron_rows) > 0:
-                            gron_rank = gron_rows.index[0]
-                            gron_lq = gron_rows["STEM_LQ_COMPOSITE"].values[0]
-                            print(f"\n  Groningen: rank #{gron_rank}/{len(lq_df)}, "
-                                  f"composite STEM LQ = {gron_lq}")
-                            results_b["groningen_rank"] = gron_rank
-                            results_b["groningen_lq"] = gron_lq
-                            results_b["total_regions"] = len(lq_df)
-        else:
-            print(f"  [WARNING] No region column found")
-            print(f"     Columns: {list(vest_df.columns)}")
-
-    # B4: LISA
+    # --- Use LISA as primary source (has all provinces, sectors, job counts) ---
     lisa_df = loaded.get("LISA")
     if lisa_df is not None:
-        print(f"\n  --- B4: LISA cross-check ---")
-        print(f"  Columns: {list(lisa_df.columns)}")
+        print(f"\n  --- Using LISA for Location Quotient analysis ---")
+        print(f"  LISA sectors: {sorted(lisa_df['LISA_sector'].unique())}")
 
-        # LISA files often have gemeente as rows and sectors as columns
-        # Try to find Groningen and sum STEM-related columns
-        gemeente_col = find_column(lisa_df, ["GEMEENTE", "GEMEENTENAAM", "GM_NAAM",
-                                              "Gemeente", "gemeente"])
-        if gemeente_col:
-            gron_mask = lisa_df[gemeente_col].astype(str).str.upper().str.contains(
-                "GRONINGEN", na=False)
-            gron_lisa = lisa_df[gron_mask]
-            print(f"  Groningen rows: {len(gron_lisa)}")
+        # Use latest year
+        latest_year = lisa_df["Jaar"].max()
+        lisa_latest = lisa_df[lisa_df["Jaar"] == latest_year].copy()
+        print(f"  Using year: {latest_year}")
 
-            # Show all numeric columns for Groningen
-            numeric_cols = gron_lisa.select_dtypes(include=[np.number]).columns
-            if len(numeric_cols) > 0:
-                print(f"  Numeric columns ({len(numeric_cols)}):")
-                for nc in numeric_cols:
-                    val = gron_lisa[nc].sum()
-                    if val > 0:
-                        print(f"    {nc}: {fmt_num(val)}")
-        else:
-            # Maybe LISA has all data in rows with sector column
-            print(f"  No gemeente column -- examining structure:")
-            print(f"  First 5 rows:")
-            print(lisa_df.head().to_string())
+        # Normalize province names
+        lisa_latest["Province"] = lisa_latest["Provincie"].replace(PROVINCE_NORMALIZE)
+
+        # Classify STEM
+        lisa_latest["IS_STEM"] = lisa_latest["LISA_sector"].isin(LISA_STEM_SECTORS.keys())
+        lisa_latest["SBI_GROUP"] = lisa_latest["LISA_sector"].map(LISA_STEM_SECTORS).fillna("OTHER")
+
+        # B2: Location Quotient per province
+        print(f"\n  --- B2: Location Quotients by province ---")
+
+        lq_rows = []
+        for prov in sorted(lisa_latest["Province"].unique()):
+            prov_data = lisa_latest[lisa_latest["Province"] == prov]
+            total_prov = prov_data["Banen"].sum()
+            if total_prov == 0:
+                continue
+
+            total_national = lisa_latest["Banen"].sum()
+            row = {"REGION": prov, "TOTAL_JOBS": total_prov}
+
+            for lisa_sector, sbi_code in LISA_STEM_SECTORS.items():
+                sector_prov = prov_data[prov_data["LISA_sector"] == lisa_sector]["Banen"].sum()
+                sector_national = lisa_latest[lisa_latest["LISA_sector"] == lisa_sector]["Banen"].sum()
+
+                if total_national > 0 and sector_national > 0:
+                    lq = (sector_prov / total_prov) / (sector_national / total_national)
+                    sbi_label = STEM_SBI.get(sbi_code, sbi_code)
+                    short = sbi_label.split("(")[0].strip() if "(" in sbi_label else sbi_label
+                    row[f"LQ_{sbi_code}_{short}"] = round(lq, 2)
+
+            lq_rows.append(row)
+
+        lq_df = pd.DataFrame(lq_rows)
+        # Composite STEM LQ
+        lq_cols = [c for c in lq_df.columns if c.startswith("LQ_")]
+        lq_df["STEM_LQ_COMPOSITE"] = lq_df[lq_cols].mean(axis=1).round(2)
+
+        # B3: Rank
+        lq_df = lq_df.sort_values("STEM_LQ_COMPOSITE", ascending=False).reset_index(drop=True)
+        lq_df.index += 1
+        lq_df.index.name = "RANK"
+
+        results_b["lq"] = lq_df
+        print(f"\n  Location Quotients (ranked by STEM LQ composite):")
+        print(lq_df.to_string())
+
+        # Groningen position
+        gron_rows = lq_df[lq_df["REGION"].str.contains("Groningen", case=False)]
+        if len(gron_rows) > 0:
+            gron_rank = gron_rows.index[0]
+            gron_lq = gron_rows["STEM_LQ_COMPOSITE"].values[0]
+            results_b["groningen_rank"] = gron_rank
+            results_b["groningen_lq"] = gron_lq
+            results_b["total_regions"] = len(lq_df)
+            print(f"\n  >> Groningen: rank #{gron_rank}/{len(lq_df)}, "
+                  f"composite STEM LQ = {gron_lq}")
+
+        # Also do COROP-level analysis
+        if "COROP_gebied" in lisa_latest.columns:
+            print(f"\n  --- COROP-level LQ analysis ---")
+            corop_lq_rows = []
+            for corop in sorted(lisa_latest["COROP_gebied"].unique()):
+                corop_data = lisa_latest[lisa_latest["COROP_gebied"] == corop]
+                total_corop = corop_data["Banen"].sum()
+                if total_corop == 0:
+                    continue
+                total_national = lisa_latest["Banen"].sum()
+                row = {"COROP_REGION": corop, "TOTAL_JOBS": total_corop}
+                for lisa_sector, sbi_code in LISA_STEM_SECTORS.items():
+                    s_corop = corop_data[corop_data["LISA_sector"] == lisa_sector]["Banen"].sum()
+                    s_nat = lisa_latest[lisa_latest["LISA_sector"] == lisa_sector]["Banen"].sum()
+                    if total_national > 0 and s_nat > 0:
+                        lq = (s_corop / total_corop) / (s_nat / total_national)
+                        row[f"LQ_{sbi_code}"] = round(lq, 2)
+                corop_lq_rows.append(row)
+
+            corop_df = pd.DataFrame(corop_lq_rows)
+            corop_lq_cols = [c for c in corop_df.columns if c.startswith("LQ_")]
+            corop_df["STEM_LQ_COMPOSITE"] = corop_df[corop_lq_cols].mean(axis=1).round(2)
+            corop_df = corop_df.sort_values("STEM_LQ_COMPOSITE", ascending=False).reset_index(drop=True)
+            corop_df.index += 1
+            corop_df.index.name = "RANK"
+            results_b["corop_lq"] = corop_df
+            print(corop_df.to_string())
+
+            gron_corop = corop_df[corop_df["COROP_REGION"].str.contains("Groningen", case=False)]
+            if len(gron_corop) > 0:
+                cr = gron_corop.index[0]
+                cl = gron_corop["STEM_LQ_COMPOSITE"].values[0]
+                results_b["groningen_corop_rank"] = cr
+                results_b["groningen_corop_lq"] = cl
+                results_b["total_corop_regions"] = len(corop_df)
+                print(f"\n  >> Groningen COROP: rank #{cr}/{len(corop_df)}, "
+                      f"STEM LQ = {cl}")
+
+        # B4: Groningen STEM employment detail
+        print(f"\n  --- B4: Groningen STEM employment detail ---")
+        gron_lisa = lisa_latest[lisa_latest["Gemeente"].str.contains("Groningen", case=False)]
+        if len(gron_lisa) > 0:
+            total_gron = gron_lisa["Banen"].sum()
+            stem_gron = gron_lisa[gron_lisa["IS_STEM"]]["Banen"].sum()
+            stem_pct = stem_gron / total_gron * 100 if total_gron > 0 else 0
+            print(f"  Groningen municipality ({latest_year}):")
+            print(f"    Total jobs: {fmt_num(total_gron)}")
+            print(f"    STEM jobs:  {fmt_num(stem_gron)} ({fmt_pct(stem_pct)})")
+            results_b["lisa_total_jobs"] = total_gron
+            results_b["lisa_stem_jobs"] = stem_gron
+            results_b["lisa_stem_pct"] = stem_pct
+
+            sector_detail = gron_lisa.groupby("LISA_sector")["Banen"].sum().sort_values(ascending=False)
+            print(f"\n  Jobs by sector in Groningen:")
+            for sec, val in sector_detail.items():
+                stem_flag = " [STEM]" if sec in LISA_STEM_SECTORS else ""
+                print(f"    {sec}: {fmt_num(val)}{stem_flag}")
+            results_b["groningen_sector_detail"] = sector_detail
     else:
-        print(f"\n  [SKIP] LISA file not loaded")
+        print(f"  [SKIP] LISA file not loaded")
+
+    # --- Also inspect Vestigingen (transposed CBS format) ---
+    vest_df = loaded.get("Vestigingen")
+    if vest_df is not None:
+        print(f"\n  --- Vestigingen (CBS transposed format) ---")
+        # This file has: first column = region names, other columns = SBI sectors
+        # Columns: 'Bedrijfstakken/branches (SBI 2008)', 'C Industrie', 'J Informatie...' etc.
+        first_col = vest_df.columns[0]  # region column
+        print(f"  Region column: '{first_col}'")
+        print(f"  SBI sector columns: {list(vest_df.columns[1:])}")
+
+        # The regions are in the first column
+        print(f"  Regions in data: {list(vest_df[first_col].head(20))}")
+
+        # Extract STEM sector columns
+        stem_cols = []
+        for col in vest_df.columns[1:]:
+            if any(col.startswith(f"{sbi} ") for sbi in ["C", "D", "J", "M"]):
+                stem_cols.append(col)
+        print(f"  STEM columns identified: {stem_cols}")
+
+        # Clean numeric values in sector columns
+        for col in vest_df.columns[1:]:
+            vest_df[col] = clean_numeric(vest_df[col])
+
+        # Show Groningen row
+        gron_mask = vest_df[first_col].astype(str).str.contains("Groningen", case=False, na=False)
+        gron_vest = vest_df[gron_mask]
+        if len(gron_vest) > 0:
+            print(f"\n  Groningen establishments:")
+            for col in vest_df.columns[1:]:
+                val = gron_vest[col].values[0]
+                stem_flag = " [STEM]" if col in stem_cols else ""
+                print(f"    {col}: {fmt_num(val)}{stem_flag}")
+            results_b["vestigingen_groningen"] = gron_vest
+
+        # If multiple regions present, calculate LQ from vestigingen too
+        if len(vest_df) > 5:
+            print(f"\n  Vestigingen LQ (establishment-based):")
+            vest_lq_rows = []
+            for _, row in vest_df.iterrows():
+                region = str(row[first_col]).strip()
+                if not region or region == "nan":
+                    continue
+                total_r = sum(clean_numeric(pd.Series([row[c]])).fillna(0).iloc[0]
+                              for c in vest_df.columns[1:])
+                if total_r == 0:
+                    continue
+                total_n = sum(vest_df[c].sum() for c in vest_df.columns[1:])
+                lq_row = {"REGION": region}
+                for sc in stem_cols:
+                    s_r = row[sc] if not pd.isna(row[sc]) else 0
+                    s_n = vest_df[sc].sum()
+                    if total_n > 0 and s_n > 0:
+                        lq = (s_r / total_r) / (s_n / total_n)
+                        lq_row[f"LQ_{sc[:1]}"] = round(lq, 2)
+                vest_lq_rows.append(lq_row)
+
+            if vest_lq_rows:
+                vest_lq_df = pd.DataFrame(vest_lq_rows)
+                lq_c = [c for c in vest_lq_df.columns if c.startswith("LQ_")]
+                vest_lq_df["STEM_LQ_COMPOSITE"] = vest_lq_df[lq_c].mean(axis=1).round(2)
+                vest_lq_df = vest_lq_df.sort_values("STEM_LQ_COMPOSITE", ascending=False)
+                results_b["vestigingen_lq"] = vest_lq_df
+                print(vest_lq_df.to_string(index=False))
+    else:
+        print(f"\n  [SKIP] Vestigingen not loaded")
+
+    # Validation: compare LISA vs CBS Vestigingen for Groningen
+    if "lisa_stem_pct" in results_b and "vestigingen_groningen" in results_b:
+        print(f"\n  [VALIDATION] LISA STEM share = {fmt_pct(results_b['lisa_stem_pct'])}")
+        print(f"  Note: LISA counts workers (banen), CBS counts establishments (vestigingen)")
+        print(f"  Both are valid but measure different things")
+        note("LISA=workers vs CBS=establishments: different denominators")
 
     # Save
     output_path = os.path.join(out_dir, "output_B_location_quotients.csv")
     with safe_open(output_path) as f:
-        write_csv_header(f, "CBS Vestigingen, LISA Gemeenten 2024",
-                         "SBI sector M includes consultancy")
+        write_csv_header(f, "LISA Gemeenten 2024, CBS Vestigingen",
+                         "LISA LQ based on workers; M/L10 includes consultancy")
         for key, val in results_b.items():
             if isinstance(val, (pd.DataFrame, pd.Series)):
                 f.write(f"\n# {key}\n")
@@ -864,10 +842,9 @@ def step4_analysis_b(loaded, out_dir):
                     val.to_csv(f)
                 else:
                     val.to_csv(f)
-            else:
+            elif isinstance(val, (int, float)):
                 f.write(f"# {key}: {val}\n")
-    print(f"\n  [OK] Step 4 complete -- saved to {output_path}")
-
+    print(f"\n  [OK] Step 4 complete -> {output_path}")
     return results_b
 
 
@@ -881,70 +858,56 @@ def step5_analysis_c(loaded, out_dir):
 
     results_c = {}
 
+    # C1: Verhuisde personen
     vh_df = loaded.get("Verhuisde_personen_regio")
     if vh_df is None:
-        print(f"  [SKIP] Verhuisde_personen_regio not loaded")
-        note("Mobility flow analysis skipped: file not available")
+        print(f"  [SKIP] Verhuisde_personen not loaded")
+        note("Mobility flow analysis skipped: Verhuisde_personen file not available")
     else:
         print(f"\n  --- C1: Migration data ---")
         print(f"  Columns: {list(vh_df.columns)}")
+        print(f"  First 10 rows:")
+        print(vh_df.head(10).to_string())
 
-        year_col = find_column(vh_df, ["PERIODEN", "JAAR", "YEAR", "Perioden"])
-        regio_col = find_column(vh_df, ["REGIO", "REGIO'S", "Regio's"])
+        # This CBS file can have various structures. Try to parse it.
+        year_col = find_column(vh_df, ["PERIODEN", "JAAR", "Perioden"])
 
-        # Look for age-specific columns
-        vertrokken_cols = {}
-        gevestigd_cols = {}
-
+        # Look for age-specific columns in wide format
+        age_cols = {}
         for col in vh_df.columns:
             cl = col.lower()
-            if "vertrok" in cl or "vertrek" in cl:
-                if "20" in cl and ("25" in cl or "24" in cl):
-                    vertrokken_cols["20_25"] = col
+            if ("vertrok" in cl or "vertrek" in cl):
+                if "20" in cl and "25" in cl:
+                    age_cols["V_20_25"] = col
                 elif "25" in cl and "30" in cl:
-                    vertrokken_cols["25_30"] = col
-            elif "gevestigd" in cl or "vestiging" in cl:
-                if "20" in cl and ("25" in cl or "24" in cl):
-                    gevestigd_cols["20_25"] = col
+                    age_cols["V_25_30"] = col
+            elif ("gevestigd" in cl or "vestiging" in cl):
+                if "20" in cl and "25" in cl:
+                    age_cols["G_20_25"] = col
                 elif "25" in cl and "30" in cl:
-                    gevestigd_cols["25_30"] = col
+                    age_cols["G_25_30"] = col
 
-        # Check if data has a long format with age column
-        age_col = find_column(vh_df, ["LEEFTIJD", "LEEFTIJDSGROEP", "Leeftijd",
-                                       "Leeftijdsgroep verhuisde persoon"])
-        type_col = find_column(vh_df, ["MIGRATIE", "TYPE", "RICHTING",
-                                        "Verhuisrichting", "Stromen",
-                                        "Migratierichting"])
-        count_col = find_column(vh_df, ["WAARDE", "VALUE", "AANTAL",
-                                         "Verhuisde personen",
-                                         "Verhuisde personen (aantal)"])
-
-        if "25_30" in vertrokken_cols and "25_30" in gevestigd_cols:
-            # Wide format with age columns
-            print(f"  Found age-specific columns (wide format)")
+        if "V_25_30" in age_cols:
+            print(f"  Found age-specific columns: {age_cols}")
+            # Wide format processing
+            regio_col = find_column(vh_df, ["REGIO", "REGIOS", "Regio's"])
             if regio_col:
                 gron = vh_df[vh_df[regio_col].astype(str).str.upper().str.contains(
                     "GRONINGEN", na=False)].copy()
             else:
                 gron = vh_df.copy()
 
-            gron["V_25_30"] = clean_numeric(gron[vertrokken_cols["25_30"]])
-            gron["G_25_30"] = clean_numeric(gron[gevestigd_cols["25_30"]])
-            if "20_25" in vertrokken_cols:
-                gron["V_20_25"] = clean_numeric(gron[vertrokken_cols["20_25"]])
-                gron["G_20_25"] = clean_numeric(gron[gevestigd_cols.get("20_25", vertrokken_cols["20_25"])])
-            else:
-                gron["V_20_25"] = 0
-                gron["G_20_25"] = 0
+            for key, col in age_cols.items():
+                gron[key] = clean_numeric(gron[col])
 
-            gron["NET_20_25"] = gron["G_20_25"] - gron["V_20_25"]
+            gron["NET_20_25"] = gron.get("G_20_25", 0) - gron.get("V_20_25", 0)
             gron["NET_25_30"] = gron["G_25_30"] - gron["V_25_30"]
 
             if year_col:
-                yearly_mig = gron.groupby(year_col).agg({
-                    "G_20_25": "sum", "V_20_25": "sum", "NET_20_25": "sum",
-                    "G_25_30": "sum", "V_25_30": "sum", "NET_25_30": "sum",
-                }).reset_index()
+                mig_cols = ["G_20_25", "V_20_25", "NET_20_25",
+                            "G_25_30", "V_25_30", "NET_25_30"]
+                mig_cols = [c for c in mig_cols if c in gron.columns]
+                yearly_mig = gron.groupby(year_col)[mig_cols].sum().reset_index()
                 yearly_mig["RETENTION_25_30"] = (
                     yearly_mig["G_25_30"] /
                     (yearly_mig["G_25_30"] + yearly_mig["V_25_30"]) * 100
@@ -952,178 +915,139 @@ def step5_analysis_c(loaded, out_dir):
                 results_c["yearly_migration"] = yearly_mig
                 print(f"\n  Annual net migration:")
                 print(yearly_mig.to_string(index=False))
-        elif age_col:
-            # Long format
-            print(f"  Found age column: {age_col}")
-            print(f"  Age groups: {vh_df[age_col].unique()}")
-
-            if regio_col:
-                gron = vh_df[vh_df[regio_col].astype(str).str.upper().str.contains(
-                    "GRONINGEN", na=False)].copy()
-            else:
-                gron = vh_df.copy()
-
-            if count_col:
-                gron["VALUE"] = clean_numeric(gron[count_col])
-            else:
-                # Look for any numeric column
-                for c in gron.columns:
-                    if gron[c].dtype in [np.int64, np.float64]:
-                        gron["VALUE"] = gron[c]
-                        print(f"  Using '{c}' as value column")
-                        break
-
-            if "VALUE" in gron.columns:
-                # Filter for relevant age groups
-                age_vals = gron[age_col].astype(str)
-                mask_20_25 = age_vals.str.contains("20.*25|20.*24", na=False, regex=True)
-                mask_25_30 = age_vals.str.contains("25.*30|25.*29", na=False, regex=True)
-
-                if mask_25_30.any():
-                    print(f"  Age 25-30 rows: {mask_25_30.sum()}")
-                    mig_25_30 = gron[mask_25_30]
-
-                    if type_col:
-                        print(f"  Migration types: {mig_25_30[type_col].unique()}")
-                        # Try to identify inflow/outflow
-                        for _, row in mig_25_30.head(10).iterrows():
-                            print(f"    {row[type_col]}: {row['VALUE']}")
-
-                    if year_col:
-                        summary = mig_25_30.groupby(year_col)["VALUE"].sum()
-                        print(f"\n  Values by year (age 25-30):")
-                        print(summary.to_string())
-                        results_c["migration_25_30"] = summary
-                else:
-                    print(f"  [WARNING] No rows matching age 25-30")
-                    print(f"  Available age values: {sorted(gron[age_col].unique(), key=str)}")
         else:
-            # Unknown format -- show all columns with samples
-            print(f"  [WARNING] Cannot identify column structure automatically")
-            print(f"  Showing all columns with sample values:")
-            for col in vh_df.columns:
-                sample = vh_df[col].dropna().head(3).tolist()
-                print(f"    {col}: {sample}")
-            note("Migration data: unknown column structure, manual inspection needed")
+            # Try long format with age group column
+            age_col = find_column(vh_df, ["LEEFTIJD", "LEEFTIJDSGROEP", "Leeftijd",
+                                           "Leeftijdsgroep verhuisde persoon"])
+            if age_col:
+                print(f"  Long format with age column: {age_col}")
+                print(f"  Age groups: {vh_df[age_col].unique()}")
+            else:
+                print(f"  [WARNING] Cannot identify age-specific columns")
+                print(f"  Attempting to show all data:")
+                for col in vh_df.columns:
+                    print(f"    {col}: {vh_df[col].head(3).tolist()}")
+                note("Migration: unknown column structure")
 
     # C4: Tussen gemeenten (destination analysis)
     tussen_df = loaded.get("Tussen")
     if tussen_df is None:
-        print(f"\n  [SKIP] Destination analysis -- Tussen_gemeenten files not found")
-        print(f"     Cannot show WHERE graduates go, only THAT they leave.")
-        note("Destination analysis skipped: Tussen_gemeenten files not available")
+        print(f"\n  [SKIP] Tussen_gemeenten not loaded")
+        note("Destination analysis skipped: critical for spatial argument")
     else:
         print(f"\n  --- C4: Destination analysis ---")
-        print(f"  Combined Tussen_gemeenten: {len(tussen_df)} rows")
+        print(f"  Shape: {tussen_df.shape}")
         print(f"  Columns: {list(tussen_df.columns)}")
+        print(f"  All data:")
+        print(tussen_df.to_string())
 
-        dest_col = find_column(tussen_df, ["BESTEMMING", "VESTIGINGSGEMEENTE",
-                                            "GEMEENTE_VESTIGING", "Regio van vestiging",
-                                            "Regio's (vestiging)", "REGIO"])
-        count_col = find_column(tussen_df, ["AANTAL", "PERSONEN", "WAARDE",
-                                             "Verhuisde personen",
-                                             "Tussen gemeenten verhuisde personen (aantal)"])
+        # The Tussen files have a peculiar structure from the output:
+        # Column 'Unnamed: 0' has province names and counts mixed
+        # Column 'Regio van vestiging' has more province/count values
+        # This appears to be a transposed/pivoted CBS download
 
-        # Show sample for debugging
-        print(f"  First 5 rows:")
-        print(tussen_df.head().to_string())
+        # Try to parse the unusual structure
+        # Each year-file seems to have: row 0 = province names, row 1 = "aantal",
+        # row 2 = actual counts, row 3 = NaN
+        # And columns represent different destination provinces
 
-        if dest_col and count_col:
-            tussen_df["COUNT"] = clean_numeric(tussen_df[count_col])
-            print(f"  Destination column: {dest_col}")
-            print(f"  Count column: {count_col}")
+        print(f"\n  Attempting to parse transposed Tussen_gemeenten structure...")
 
-            dest_summary = tussen_df.groupby(dest_col)["COUNT"].sum().sort_values(ascending=False)
-            print(f"\n  Top 15 destinations:")
-            print(dest_summary.head(15).to_string())
-            results_c["destinations"] = dest_summary
+        # Group by FILE_YEAR and try to extract province->count pairs
+        dest_data = []
+        for year in sorted(tussen_df["FILE_YEAR"].unique()):
+            year_data = tussen_df[tussen_df["FILE_YEAR"] == year]
 
-            # Map to provinces
-            def guess_province(gemeente_name):
-                g = str(gemeente_name).strip()
-                # Direct lookup
-                if g in GEMEENTE_PROVINCIE:
-                    return GEMEENTE_PROVINCIE[g]
-                # Check if name is a province
-                for prov in DUTCH_PROVINCES:
-                    if prov.lower() in g.lower():
-                        return prov
-                # Check partial matches
-                for gem, prov in GEMEENTE_PROVINCIE.items():
-                    if gem.lower() in g.lower() or g.lower() in gem.lower():
-                        return prov
-                return "Overig/Onbekend"
+            # The data seems to have province names in one row, counts in another
+            # Each column pair represents a destination
+            for col in tussen_df.columns:
+                if col == "FILE_YEAR":
+                    continue
+                values = year_data[col].tolist()
+                # Look for pattern: province name, "aantal", number, NaN
+                province_name = None
+                count_val = None
+                for v in values:
+                    v_str = str(v).strip()
+                    if "(PV)" in v_str:
+                        province_name = v_str.replace(" (PV)", "")
+                    elif v_str.isdigit():
+                        count_val = int(v_str)
+                    else:
+                        try:
+                            count_val = int(float(v_str))
+                        except (ValueError, TypeError):
+                            pass
 
-            tussen_df["PROVINCE"] = tussen_df[dest_col].apply(guess_province)
+                if province_name and count_val:
+                    dest_data.append({
+                        "YEAR": year,
+                        "DESTINATION_PROVINCE": province_name,
+                        "PERSONS": count_val,
+                    })
 
-            unknown = tussen_df[tussen_df["PROVINCE"] == "Overig/Onbekend"]
-            if len(unknown) > 0:
-                unknown_dests = unknown[dest_col].unique()
-                print(f"\n  [NOTE] {len(unknown_dests)} destinations not mapped to province:")
-                for d in sorted(unknown_dests, key=str)[:20]:
-                    print(f"    {d}")
-                note(f"{len(unknown_dests)} destination municipalities not mapped to province")
+        if dest_data:
+            dest_df = pd.DataFrame(dest_data)
+            print(f"\n  Parsed destination data:")
+            print(dest_df.to_string(index=False))
 
-            prov_summary = tussen_df.groupby("PROVINCE")["COUNT"].sum().sort_values(ascending=False)
-            total_outflow = prov_summary.sum()
-            prov_summary_df = pd.DataFrame({
-                "DESTINATION_PROVINCE": prov_summary.index,
-                "PERSONS_FROM_GRONINGEN": prov_summary.values,
-                "PCT_OF_TOTAL_OUTFLOW": (prov_summary.values / total_outflow * 100).round(1),
+            # Aggregate across years
+            prov_total = dest_df.groupby("DESTINATION_PROVINCE")["PERSONS"].sum().sort_values(ascending=False)
+            total_outflow = prov_total.sum()
+
+            prov_summary = pd.DataFrame({
+                "DESTINATION_PROVINCE": prov_total.index,
+                "PERSONS_FROM_GRONINGEN": prov_total.values,
+                "PCT_OF_TOTAL_OUTFLOW": (prov_total.values / total_outflow * 100).round(1),
             })
 
             # Mobility intensity
             intensities = []
-            for _, row in prov_summary_df.iterrows():
+            for _, row in prov_summary.iterrows():
                 prov = row["DESTINATION_PROVINCE"]
                 if prov in PROVINCE_POP and prov != "Groningen":
                     pct_flow = row["PCT_OF_TOTAL_OUTFLOW"] / 100
                     pct_pop = PROVINCE_POP[prov] / NL_TOTAL_POP
-                    intensity = pct_flow / pct_pop if pct_pop > 0 else np.nan
-                    intensities.append(round(intensity, 2))
+                    intensities.append(round(pct_flow / pct_pop, 2) if pct_pop > 0 else np.nan)
                 else:
                     intensities.append(np.nan)
-            prov_summary_df["MOBILITY_INTENSITY"] = intensities
+            prov_summary["MOBILITY_INTENSITY"] = intensities
 
-            results_c["province_destinations"] = prov_summary_df
-            print(f"\n  Destination provinces:")
-            print(prov_summary_df.to_string(index=False))
+            results_c["province_destinations"] = prov_summary
+            print(f"\n  Destination provinces (aggregated):")
+            print(prov_summary.to_string(index=False))
 
-            # Year breakdown if available
-            if "FILE_YEAR" in tussen_df.columns:
-                year_prov = tussen_df.groupby(["FILE_YEAR", "PROVINCE"])["COUNT"].sum().unstack(
-                    fill_value=0)
-                print(f"\n  Destinations by year:")
-                print(year_prov.to_string())
-                results_c["yearly_destinations"] = year_prov
+            # Year breakdown
+            yearly_dest = dest_df.pivot_table(index="DESTINATION_PROVINCE",
+                                              columns="YEAR", values="PERSONS",
+                                              aggfunc="sum", fill_value=0)
+            results_c["yearly_destinations"] = yearly_dest
+            print(f"\n  By year:")
+            print(yearly_dest.to_string())
         else:
-            print(f"  [WARNING] Could not identify destination or count columns")
-            print(f"  Attempting to find correct columns from data sample...")
-            # Show all columns and their types
-            for col in tussen_df.columns:
-                print(f"    {col} ({tussen_df[col].dtype}): {tussen_df[col].head(3).tolist()}")
+            print(f"  [WARNING] Could not parse Tussen_gemeenten structure")
+            print(f"  The CBS download may need different filter settings:")
+            print(f"  -> Select ALL destination municipalities (not just a few)")
+            print(f"  -> The current files only have 2 columns = 2 destinations")
+            note("Tussen_gemeenten: only 2 destination provinces found. "
+                 "Re-download with ALL municipalities selected.")
 
     # Methodological note
     print(f"\n  Methodological note:")
-    print(f"  - Uses residential mobility data (BRP) as proxy for graduate transitions")
-    print(f"  - Captures all movers aged 25-30, not only graduates")
-    print(f"  - ~25% of Groningen 25-30 cohort are students/recent graduates")
-    print(f"  - Should be triangulated with WO-Monitor alumni surveys")
+    print(f"  - BRP mobility data is a proxy for graduate transitions")
+    print(f"  - Captures all movers 25-30, not only graduates")
+    print(f"  - ~25% of Groningen 25-30 cohort = students/recent grads")
 
     # Save
     output_path = os.path.join(out_dir, "output_C_mobility_flows.csv")
     with safe_open(output_path) as f:
-        write_csv_header(f, "CBS 60048ned, CBS 81734NED (Tussen gemeenten)",
-                         "All movers, not only graduates; BRP data")
+        write_csv_header(f, "CBS 60048ned, CBS 81734NED",
+                         "All movers, not only graduates")
         for key, val in results_c.items():
             if isinstance(val, (pd.DataFrame, pd.Series)):
                 f.write(f"\n# {key}\n")
-                if isinstance(val, pd.Series):
-                    val.to_csv(f)
-                else:
-                    val.to_csv(f, index=False)
-    print(f"\n  [OK] Step 5 complete -- saved to {output_path}")
-
+                val.to_csv(f)
+    print(f"\n  [OK] Step 5 complete -> {output_path}")
     return results_c
 
 
@@ -1139,66 +1063,30 @@ def step6_analysis_d(loaded, out_dir):
     ocw_df = loaded.get("OCW")
 
     if ocw_df is None:
-        print(f"  [SKIP] OCW file not found -- match analysis skipped")
-        print(f"     Download from: ocwincijfers.nl -> Hoger Onderwijs -> Arbeidsmarkt -> CSV")
+        print(f"  [SKIP] OCW file not found")
+        print(f"  Download: ocwincijfers.nl -> Hoger Onderwijs -> Arbeidsmarkt -> CSV")
         note("Match analysis skipped: OCW file not available")
     else:
-        print(f"\n  Processing OCW data...")
-        print(f"  Columns: {list(ocw_df.columns)}")
-
-        field_col = find_column(ocw_df, ["OPLEIDING", "STUDIERICHTING", "STUDIE",
-                                          "Opleiding", "Opleidingsnaam"])
-        employed_col = find_column(ocw_df, ["WERKZAAM", "% werkzaam", "Werkzaam"])
-        match_col = find_column(ocw_df, ["AANSLUITING", "MATCH", "eigen of verwant",
-                                          "Aansluiting"])
-        salary_col = find_column(ocw_df, ["SALARIS", "Bruto maandloon", "Mediaan bruto"])
-
+        field_col = find_column(ocw_df, ["OPLEIDING", "STUDIERICHTING", "Opleiding"])
         if field_col:
-            ocw_df["IS_STEM"] = ocw_df[field_col].apply(lambda x:
-                any(kw in str(x).upper() for kw in
+            ocw_df["TYPE"] = ocw_df[field_col].apply(lambda x:
+                "STEM" if any(kw in str(x).upper() for kw in
                     ["TECHNIEK", "NATUUR", "WISKUNDE", "INFORMATICA", "WERKTUIG",
-                     "ELEKTRO", "SCHEIKUNDE", "BIOLOGIE", "ENGINEERING", "ICT"]))
-            ocw_df["TYPE"] = ocw_df["IS_STEM"].map({True: "STEM", False: "NonSTEM"})
-
-            cols_to_show = [field_col, "TYPE"]
-            if employed_col:
-                ocw_df["PCT_EMPLOYED"] = clean_numeric(ocw_df[employed_col])
-                cols_to_show.append("PCT_EMPLOYED")
-            if match_col:
-                ocw_df["PCT_FIELD_MATCH"] = clean_numeric(ocw_df[match_col])
-                cols_to_show.append("PCT_FIELD_MATCH")
-            if salary_col:
-                ocw_df["AVG_SALARY"] = clean_numeric(ocw_df[salary_col])
-                cols_to_show.append("AVG_SALARY")
-
-            result_df = ocw_df[cols_to_show].dropna(subset=[field_col])
-            results_d["match_by_field"] = result_df
-            print(result_df.to_string(index=False))
-
-            if "PCT_FIELD_MATCH" in result_df.columns:
-                summary = result_df.groupby("TYPE")["PCT_FIELD_MATCH"].mean()
-                print(f"\n  Average field match rate:")
-                for t, v in summary.items():
-                    print(f"    {t}: {fmt_pct(v)}")
-                diff = summary.get("STEM", 0) - summary.get("NonSTEM", 0)
-                print(f"    Difference: {diff:+.1f} pp")
-                results_d["stem_match_advantage"] = diff
+                     "ELEKTRO", "SCHEIKUNDE", "BIOLOGIE", "ENGINEERING"]) else "NonSTEM")
+            print(ocw_df.to_string())
+            results_d["raw"] = ocw_df
 
     output_path = os.path.join(out_dir, "output_D_match_analysis.csv")
     with safe_open(output_path) as f:
-        write_csv_header(f, "OCW arbeidsmarktkenmerken WO uitstromers",
-                         "National data, not Groningen-specific")
+        write_csv_header(f, "OCW arbeidsmarktkenmerken", "National data")
         if results_d:
             for key, val in results_d.items():
-                if isinstance(val, (pd.DataFrame, pd.Series)):
+                if isinstance(val, pd.DataFrame):
                     f.write(f"\n# {key}\n")
                     val.to_csv(f, index=False)
-                else:
-                    f.write(f"# {key}: {val}\n")
         else:
             f.write("# No data available -- OCW file not found\n")
-    print(f"\n  [OK] Step 6 complete -- saved to {output_path}")
-
+    print(f"\n  [OK] Step 6 complete -> {output_path}")
     return results_d
 
 
@@ -1210,11 +1098,7 @@ def step7_synthesis(results_a, results_b, results_c, results_d, out_dir):
     print("=== STEP 7: CORE FINDING SYNTHESIS ===")
     print("=" * 60)
 
-    lines = []
-    lines.append("=" * 60)
-    lines.append("CORE FINDING SYNTHESIS")
-    lines.append(f"Generated: {generated_date}")
-    lines.append("=" * 60)
+    lines = ["=" * 60, "CORE FINDING SYNTHESIS", f"Generated: {generated_date}", "=" * 60]
 
     # 1. SUPPLY
     lines.append("\n1. SUPPLY (Analysis A):")
@@ -1227,94 +1111,93 @@ def step7_synthesis(results_a, results_b, results_c, results_d, out_dir):
             stem_col = f"{level}_STEM_GRADS"
             pct_col = f"{level}_STEM_PCT"
             if stem_col in df.columns and len(df) > 0:
-                latest = df[stem_col].iloc[-1]
-                lines.append(f"   {level} STEM graduates (latest year): {fmt_num(latest)}")
+                lines.append(f"   {level} STEM graduates (latest): {fmt_num(df[stem_col].iloc[-1])}")
             if pct_col in df.columns and len(df) > 0:
-                latest_pct = df[pct_col].iloc[-1]
-                lines.append(f"   {level} STEM share: {latest_pct}%")
-                if len(df) >= 3:
-                    values = df[pct_col].dropna()
-                    mean_val = values.mean()
-                    std_val = values.std() if len(values) > 1 else 0
-                    latest_val = values.iloc[-1]
-                    if std_val > 0 and latest_val > mean_val + std_val:
-                        trend = "growing"
-                    elif std_val > 0 and latest_val < mean_val - std_val:
-                        trend = "declining"
-                    else:
-                        trend = "stable"
+                lines.append(f"   {level} STEM share: {df[pct_col].iloc[-1]}%")
+                vals = df[pct_col].dropna()
+                if len(vals) >= 3:
+                    m, s = vals.mean(), vals.std()
+                    l = vals.iloc[-1]
+                    trend = ("growing" if s > 0 and l > m + s else
+                             "declining" if s > 0 and l < m - s else "stable")
                     lines.append(f"   {level} trend: {trend}")
     if not has_supply:
         lines.append("   [Data not available]")
 
+    # Combined
+    wo_key, hbo_key = "WO_yearly", "HBO_yearly"
+    if wo_key in results_a and hbo_key in results_a:
+        wo_latest = results_a[wo_key]["WO_STEM_GRADS"].iloc[-1]
+        hbo_latest = results_a[hbo_key]["HBO_STEM_GRADS"].iloc[-1]
+        lines.append(f"   Combined STEM graduates (WO+HBO): {fmt_num(wo_latest + hbo_latest)}")
+
     # 2. DEMAND
     lines.append("\n2. DEMAND (Analysis B):")
     if "groningen_lq" in results_b:
-        lines.append(f"   Groningen STEM LQ composite: {results_b['groningen_lq']} "
-                     f"(national average = 1.0)")
-        lines.append(f"   Groningen ranks #{results_b.get('groningen_rank', '?')} "
-                     f"of {results_b.get('total_regions', '?')} regions")
+        lines.append(f"   Groningen STEM LQ (province): {results_b['groningen_lq']} "
+                     f"(national avg = 1.0)")
+        lines.append(f"   Province rank: #{results_b.get('groningen_rank', '?')}"
+                     f"/{results_b.get('total_regions', '?')}")
         if results_b['groningen_lq'] < 1.0:
-            lines.append("   -> Groningen is UNDER-specialized in STEM industries")
-            lines.append("   -> Local economy cannot absorb all STEM graduates")
-        elif results_b['groningen_lq'] > 1.2:
-            lines.append("   -> Groningen is specialized in STEM industries")
+            lines.append("   -> UNDER-specialized in STEM: local economy cannot absorb all grads")
+        if "groningen_corop_lq" in results_b:
+            lines.append(f"   COROP rank: #{results_b['groningen_corop_rank']}"
+                         f"/{results_b['total_corop_regions']}"
+                         f" (LQ={results_b['groningen_corop_lq']})")
         if "lq" in results_b:
             top3 = results_b["lq"].head(3)
-            lines.append("   Top STEM regions:")
-            for _, row in top3.iterrows():
-                lines.append(f"     {row['REGION']}: LQ={row['STEM_LQ_COMPOSITE']}")
-    else:
-        lines.append("   [LQ data not available]")
+            lines.append("   Top STEM provinces:")
+            for _, r in top3.iterrows():
+                lines.append(f"     {r['REGION']}: LQ={r['STEM_LQ_COMPOSITE']}")
+    if "lisa_stem_pct" in results_b:
+        lines.append(f"   Groningen STEM employment: {fmt_pct(results_b['lisa_stem_pct'])} "
+                     f"of {fmt_num(results_b['lisa_total_jobs'])} total jobs")
 
     # 3. MOBILITY
     lines.append("\n3. MOBILITY (Analysis C):")
     if "yearly_migration" in results_c:
         mig = results_c["yearly_migration"]
-        avg_net = mig["NET_25_30"].mean()
-        lines.append(f"   Avg annual net flow 25-30: {fmt_num(avg_net)} (negative = outflow)")
-        lines.append(f"   Pattern spans {len(mig)} years")
+        avg = mig["NET_25_30"].mean()
+        lines.append(f"   Avg annual net flow 25-30: {fmt_num(avg)}")
     if "province_destinations" in results_c:
         dest = results_c["province_destinations"]
-        valid_dest = dest[dest["DESTINATION_PROVINCE"] != "Overig/Onbekend"]
-        if len(valid_dest) > 0:
-            top = valid_dest.iloc[0]
-            lines.append(f"   Top destination: {top['DESTINATION_PROVINCE']} "
-                         f"({fmt_pct(top['PCT_OF_TOTAL_OUTFLOW'])})")
-            nb = valid_dest[valid_dest["DESTINATION_PROVINCE"] == "Noord-Brabant"]
-            if len(nb) > 0 and not pd.isna(nb.iloc[0]["MOBILITY_INTENSITY"]):
-                intens = nb.iloc[0]["MOBILITY_INTENSITY"]
-                lines.append(f"   Noord-Brabant intensity: {intens} "
-                             f"({'overrepresented' if intens > 1 else 'proportional'})")
-    if "yearly_migration" not in results_c and "province_destinations" not in results_c:
-        lines.append("   [Migration data not available]")
+        for _, r in dest.head(3).iterrows():
+            lines.append(f"   -> {r['DESTINATION_PROVINCE']}: "
+                         f"{fmt_num(r['PERSONS_FROM_GRONINGEN'])} persons "
+                         f"({fmt_pct(r['PCT_OF_TOTAL_OUTFLOW'])})")
+            if not pd.isna(r.get("MOBILITY_INTENSITY")):
+                lines.append(f"      Mobility intensity: {r['MOBILITY_INTENSITY']}")
 
     # 4. CONNECTION
     lines.append("\n4. CONNECTION:")
     if "lq" in results_b and "province_destinations" in results_c:
-        lines.append("   Cross-referencing LQ and destination data suggests graduates")
-        lines.append("   disproportionately move to high-STEM-LQ regions.")
+        lines.append("   Cross-reference: do graduates flow to high-STEM-LQ regions?")
+        dest = results_c.get("province_destinations")
+        lq = results_b.get("lq")
+        if dest is not None and lq is not None:
+            for _, d_row in dest.iterrows():
+                prov = d_row["DESTINATION_PROVINCE"]
+                lq_match = lq[lq["REGION"] == prov]
+                if len(lq_match) > 0:
+                    lq_val = lq_match["STEM_LQ_COMPOSITE"].values[0]
+                    lines.append(f"   {prov}: outflow={fmt_pct(d_row['PCT_OF_TOTAL_OUTFLOW'])}, "
+                                 f"STEM LQ={lq_val}")
     else:
-        lines.append("   Hypothesis: STEM graduates move to high-STEM-LQ regions")
-        lines.append("   (validate with interview data and WO-Monitor surveys)")
+        lines.append("   Hypothesis: STEM grads move to high-STEM-LQ regions")
+        lines.append("   (validate with interview data + WO-Monitor)")
 
-    if results_d and "stem_match_advantage" in results_d:
-        lines.append(f"\n5. MATCH (Analysis D):")
-        lines.append(f"   STEM field match advantage: "
-                     f"{results_d['stem_match_advantage']:+.1f} pp")
-
-    synthesis_text = "\n".join(lines)
-    print(synthesis_text)
+    synthesis = "\n".join(lines)
+    print(synthesis)
 
     output_path = os.path.join(out_dir, "output_SYNTHESIS.txt")
     with safe_open(output_path) as f:
-        f.write(synthesis_text)
-    print(f"\n  [OK] Synthesis saved to {output_path}")
-    return synthesis_text
+        f.write(synthesis)
+    print(f"\n  [OK] Synthesis -> {output_path}")
+    return synthesis
 
 
 # ---------------------------------------------------------------------------
-# STEP 8 + 10: Data quality + Academic checks
+# STEP 8 + 10: Data quality + Quality checks
 # ---------------------------------------------------------------------------
 def step8_data_quality(missing_keys, out_dir):
     print("\n" + "=" * 60)
@@ -1328,95 +1211,77 @@ def step8_data_quality(missing_keys, out_dir):
         f.write("=" * 60 + "\n\n")
 
         f.write("MISSING FILES:\n")
-        if missing_keys:
-            for k in missing_keys:
-                f.write(f"  - {k}\n")
-        else:
+        for k in missing_keys:
+            f.write(f"  - {k}\n")
+        if not missing_keys:
             f.write("  All files present\n")
 
-        f.write(f"\nDATA QUALITY NOTES ({len(data_quality_notes)} items):\n")
+        f.write(f"\nDATA QUALITY NOTES ({len(data_quality_notes)}):\n")
         for i, n in enumerate(data_quality_notes, 1):
             f.write(f"  {i}. {n}\n")
 
         f.write("\nSTANDARD CAVEATS:\n")
-        caveats = [
-            "Verhuisde personen data captures ALL movers aged 25-30, not only graduates",
-            "Groningen has ~60,000 students / ~235,000 residents (~25% of 25-30 cohort)",
-            "DUO uses academic years (Sep-Aug); CBS mobility uses calendar years (6-month offset)",
-            "COVID years 2020-2021 may show anomalous migration patterns",
-            "Pipeline dropout rate is upper bound (no individual-level tracking)",
-            "SBI sector M includes consultancy alongside R&D/Engineering",
-            "Location Quotients based on establishment counts, not employment",
-            "Should be triangulated with WO-Monitor alumni surveys and interview data",
-        ]
-        for c in caveats:
+        for c in [
+            "Verhuisde personen = ALL movers aged 25-30, not only graduates",
+            "Groningen: ~60k students / ~235k residents (~25% of 25-30 cohort)",
+            "DUO academic years (Sep-Aug) vs CBS calendar years (6-month offset)",
+            "COVID 2020-2021 may show anomalous patterns",
+            "Pipeline dropout is upper bound (no individual tracking)",
+            "SBI M / LISA L10 includes consultancy + R&D",
+            "LISA LQ based on worker counts; CBS Vestigingen on establishments",
+            "Triangulate with WO-Monitor alumni surveys + interview data",
+        ]:
             f.write(f"  - {c}\n")
 
-        f.write("\nREPRESENTATIVENESS:\n")
-        f.write("  The mobility data captures all residential moves registered in the BRP\n")
-        f.write("  for Groningen. The 25-30 age group includes both graduates and\n")
-        f.write("  non-graduates. Approx 25% of Groningen's population are students,\n")
-        f.write("  making this a reasonable but imperfect proxy for graduate mobility.\n")
-
-    for c in caveats[:3]:
-        print(f"  - {c}")
-    print(f"  [OK] Full report saved to {output_path}")
+    print(f"  [OK] -> {output_path}")
 
 
-def step10_quality_checks(results_a, results_b, results_c, results_d):
+def step10_quality_checks(results_a):
     print("\n" + "=" * 60)
     print("=== ACADEMIC QUALITY CHECKS ===")
     print("=" * 60)
 
-    # Sample size
-    print("\n  1. Sample size check:")
+    print("\n  1. Sample size:")
     for key, df in results_a.items():
         if isinstance(df, pd.DataFrame):
-            numeric_df = df.select_dtypes(include=[np.number])
-            small = (numeric_df < 30) & (numeric_df > 0)
+            num = df.select_dtypes(include=[np.number])
+            small = (num < 30) & (num > 0)
             if small.any().any():
-                print(f"     [!] {key}: contains cells with n < 30")
-                note(f"Small sample warning: {key}")
+                print(f"     [!] {key}: some cells n < 30")
             else:
-                print(f"     [OK] {key}: sufficient sample sizes")
+                print(f"     [OK] {key}")
 
-    # Trend
     print("\n  2. Trend direction:")
     for level in ["WO", "HBO"]:
         key = f"{level}_yearly"
         if key in results_a:
-            df = results_a[key]
             pct_col = f"{level}_STEM_PCT"
-            if pct_col in df.columns:
-                values = df[pct_col].dropna()
-                if len(values) >= 3:
-                    m, s = values.mean(), values.std()
-                    latest = values.iloc[-1]
-                    if s > 0 and latest > m + s:
-                        print(f"     {pct_col}: meaningful increase")
-                    elif s > 0 and latest < m - s:
+            if pct_col in results_a[key].columns:
+                vals = results_a[key][pct_col].dropna()
+                if len(vals) >= 3:
+                    m, s = vals.mean(), vals.std()
+                    l = vals.iloc[-1]
+                    if s > 0 and l > m + s:
+                        print(f"     {pct_col}: meaningful increase (latest={l:.1f}, mean={m:.1f})")
+                    elif s > 0 and l < m - s:
                         print(f"     {pct_col}: meaningful decrease")
                     else:
-                        print(f"     {pct_col}: within noise range")
+                        print(f"     {pct_col}: within noise (latest={l:.1f}, mean={m:.1f})")
 
-    print("\n  3. Year comparability: DUO academic years vs CBS calendar years (6-month offset)")
-    print("  4. Representativeness: mobility data = all movers 25-30, not only graduates")
-    print("  5. COVID: years 2020-2021 may be anomalous -- recommend separate reporting")
-    note("Academic year vs calendar year: 6-month offset in all comparisons")
+    print("\n  3. DUO academic years vs CBS calendar years: 6-month offset")
+    print("  4. Representativeness: mobility data = all movers 25-30")
+    print("  5. COVID: 2020-2021 may be anomalous")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Graduate Mobility Analysis -- GEMRAMA")
-    parser.add_argument("--data-dir", default=None,
-                        help="Directory containing input data files")
-    parser.add_argument("--output-dir", default=None,
-                        help="Directory for output files (defaults to data-dir)")
+    parser = argparse.ArgumentParser(description="Graduate Mobility Analysis")
+    parser.add_argument("--data-dir", default=None)
+    parser.add_argument("--output-dir", default=None)
     args = parser.parse_args()
 
-    # Default: use the directory where this script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.abspath(args.data_dir) if args.data_dir else script_dir
     out_dir = os.path.abspath(args.output_dir) if args.output_dir else data_dir
@@ -1427,7 +1292,7 @@ def main():
     print(f"Output directory: {out_dir}")
     print("=" * 60)
 
-    # List actual files in data directory
+    # List data files
     print(f"\nFiles in data directory:")
     try:
         for fn in sorted(os.listdir(data_dir)):
@@ -1435,10 +1300,10 @@ def main():
                 size = os.path.getsize(os.path.join(data_dir, fn))
                 print(f"  {fn} ({size:,} bytes)")
     except Exception as e:
-        print(f"  [ERROR] Cannot list directory: {e}")
+        print(f"  [ERROR] {e}")
 
     found, missing = step0_file_check(data_dir)
-    loaded = step1_inspect(found, data_dir)
+    loaded = step1_inspect(found)
     step2_stem_classification()
     results_a = step3_analysis_a(loaded, out_dir)
     results_b = step4_analysis_b(loaded, out_dir)
@@ -1446,21 +1311,16 @@ def main():
     results_d = step6_analysis_d(loaded, out_dir)
     step7_synthesis(results_a, results_b, results_c, results_d, out_dir)
     step8_data_quality(missing, out_dir)
-    step10_quality_checks(results_a, results_b, results_c, results_d)
+    step10_quality_checks(results_a)
 
-    # Final status
     print("\n" + "=" * 60)
     print("=== FINAL STATUS ===")
     print("=" * 60)
-
     if not missing:
-        print("  Situation A: All files present, all analyses ran")
-    elif len(missing) <= 3:
-        print("  Situation B: Some files missing, partial analysis ran")
-        print("  Check output_DATA_QUALITY.txt for details")
+        print("  All files present, all analyses ran")
     else:
-        print("  Situation C: Many files missing")
-        print("  Follow download instructions above")
+        print(f"  {len(missing)} files missing -- partial analysis")
+        print(f"  Missing: {', '.join(missing)}")
 
     print(f"\n  Output files in: {out_dir}")
     for fn in ["output_A_stem_pipeline_groningen.csv",
@@ -1470,8 +1330,7 @@ def main():
                "output_SYNTHESIS.txt",
                "output_DATA_QUALITY.txt"]:
         fp = os.path.join(out_dir, fn)
-        status = "[OK]" if os.path.isfile(fp) else "[--]"
-        print(f"    {status} {fn}")
+        print(f"    {'[OK]' if os.path.isfile(fp) else '[--]'} {fn}")
 
 
 if __name__ == "__main__":
