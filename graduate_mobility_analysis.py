@@ -1274,6 +1274,456 @@ def step10_quality_checks(results_a):
 
 
 # ---------------------------------------------------------------------------
+# STEP 9: Clean output tables + charts
+# ---------------------------------------------------------------------------
+def step9_export_tables(results_a, results_b, results_c, results_d, out_dir):
+    """Produce clean, directly usable output tables and charts."""
+    print("\n" + "=" * 60)
+    print("=== STEP 9: EXPORTING CLEAN TABLES & CHARTS ===")
+    print("=" * 60)
+
+    tables = {}  # name -> DataFrame for Excel workbook
+
+    # -----------------------------------------------------------------------
+    # TABLE 1: STEM Graduates Annual (combined WO + HBO)
+    # -----------------------------------------------------------------------
+    wo = results_a.get("WO_yearly")
+    hbo = results_a.get("HBO_yearly")
+    if wo is not None or hbo is not None:
+        dfs = []
+        if wo is not None:
+            dfs.append(wo)
+        if hbo is not None:
+            dfs.append(hbo)
+        t1 = pd.concat(dfs, axis=1).fillna(0)
+        # Add combined columns
+        stem_cols = [c for c in t1.columns if "STEM_GRADS" in c and "NON" not in c]
+        nonstem_cols = [c for c in t1.columns if "NONSTEM_GRADS" in c]
+        if stem_cols:
+            t1["TOTAL_STEM"] = t1[stem_cols].sum(axis=1).astype(int)
+        if nonstem_cols:
+            t1["TOTAL_NONSTEM"] = t1[nonstem_cols].sum(axis=1).astype(int)
+        if "TOTAL_STEM" in t1.columns and "TOTAL_NONSTEM" in t1.columns:
+            total = t1["TOTAL_STEM"] + t1["TOTAL_NONSTEM"]
+            t1["TOTAL_STEM_PCT"] = (t1["TOTAL_STEM"] / total * 100).round(1)
+        t1.index.name = "YEAR"
+        t1.to_csv(os.path.join(out_dir, "table_A1_stem_graduates_annual.csv"))
+        tables["A1_STEM_Graduates"] = t1
+        print(f"  [OK] table_A1_stem_graduates_annual.csv")
+        print(t1.to_string())
+
+    # -----------------------------------------------------------------------
+    # TABLE 2: Gender by Sector
+    # -----------------------------------------------------------------------
+    for level in ["WO", "HBO"]:
+        for suffix in ["_gender", "_gender_inschrijvingen"]:
+            key = f"{level}{suffix}"
+            if key in results_a:
+                t2 = results_a[key].copy()
+                fname = f"table_A2_gender_{level.lower()}.csv"
+                t2.to_csv(os.path.join(out_dir, fname), index=False)
+                tables[f"A2_Gender_{level}"] = t2
+                print(f"  [OK] {fname}")
+                break
+
+    # -----------------------------------------------------------------------
+    # TABLE 3: Province-level Location Quotients
+    # -----------------------------------------------------------------------
+    if "lq" in results_b:
+        t3 = results_b["lq"].copy()
+        t3.to_csv(os.path.join(out_dir, "table_B1_province_lq.csv"))
+        tables["B1_Province_LQ"] = t3
+        print(f"  [OK] table_B1_province_lq.csv")
+
+    # -----------------------------------------------------------------------
+    # TABLE 4: COROP-level Location Quotients
+    # -----------------------------------------------------------------------
+    if "corop_lq" in results_b:
+        t4 = results_b["corop_lq"].copy()
+        t4.to_csv(os.path.join(out_dir, "table_B2_corop_lq.csv"))
+        tables["B2_COROP_LQ"] = t4
+        print(f"  [OK] table_B2_corop_lq.csv")
+
+    # -----------------------------------------------------------------------
+    # TABLE 5: Groningen Sector Employment Detail
+    # -----------------------------------------------------------------------
+    if "groningen_sector_detail" in results_b:
+        t5 = results_b["groningen_sector_detail"].reset_index()
+        t5.columns = ["Sector", "Jobs"]
+        t5["Is_STEM"] = t5["Sector"].isin(LISA_STEM_SECTORS.keys())
+        t5["Pct_of_Total"] = (t5["Jobs"] / t5["Jobs"].sum() * 100).round(1)
+        t5.to_csv(os.path.join(out_dir, "table_B3_groningen_jobs.csv"), index=False)
+        tables["B3_Groningen_Jobs"] = t5
+        print(f"  [OK] table_B3_groningen_jobs.csv")
+
+    # -----------------------------------------------------------------------
+    # TABLE 6: Net Migration (if available)
+    # -----------------------------------------------------------------------
+    if "yearly_migration" in results_c:
+        t6 = results_c["yearly_migration"].copy()
+        # Rename columns to readable names
+        rename_map = {
+            "G_20_25": "Settled_20_25", "V_20_25": "Departed_20_25",
+            "G_25_30": "Settled_25_30", "V_25_30": "Departed_25_30",
+            "NET_20_25": "Net_20_25", "NET_25_30": "Net_25_30",
+            "RETENTION_25_30": "Retention_Rate_25_30_pct",
+        }
+        t6 = t6.rename(columns={k: v for k, v in rename_map.items() if k in t6.columns})
+        t6.to_csv(os.path.join(out_dir, "table_C1_net_migration.csv"), index=False)
+        tables["C1_Net_Migration"] = t6
+        print(f"  [OK] table_C1_net_migration.csv")
+
+    # -----------------------------------------------------------------------
+    # TABLE 7: Destination Provinces
+    # -----------------------------------------------------------------------
+    if "province_destinations" in results_c:
+        t7 = results_c["province_destinations"].copy()
+        # Merge with LQ data to show the connection
+        if "lq" in results_b:
+            lq = results_b["lq"][["REGION", "STEM_LQ_COMPOSITE"]].copy()
+            lq = lq.rename(columns={"REGION": "DESTINATION_PROVINCE"})
+            t7 = t7.merge(lq, on="DESTINATION_PROVINCE", how="left")
+        t7.to_csv(os.path.join(out_dir, "table_C2_destination_provinces.csv"), index=False)
+        tables["C2_Destinations"] = t7
+        print(f"  [OK] table_C2_destination_provinces.csv")
+        print(t7.to_string(index=False))
+
+    # -----------------------------------------------------------------------
+    # TABLE 8: LQ vs Outflow Correlation (KEY ANALYTICAL TABLE)
+    # -----------------------------------------------------------------------
+    if "lq" in results_b and "province_destinations" in results_c:
+        lq = results_b["lq"][["REGION", "STEM_LQ_COMPOSITE"]].copy()
+        dest = results_c["province_destinations"].copy()
+        lq = lq.rename(columns={"REGION": "PROVINCE"})
+        dest = dest.rename(columns={"DESTINATION_PROVINCE": "PROVINCE"})
+        t8 = dest.merge(lq, on="PROVINCE", how="inner")
+        t8 = t8[t8["PROVINCE"] != "Groningen"]  # exclude self
+        t8 = t8[t8["PROVINCE"] != "Overig/Onbekend"]
+        t8 = t8.sort_values("STEM_LQ_COMPOSITE", ascending=False)
+
+        if len(t8) >= 3:
+            # Calculate correlation
+            from scipy import stats as scipy_stats
+            try:
+                r, p = scipy_stats.pearsonr(t8["STEM_LQ_COMPOSITE"], t8["PCT_OF_TOTAL_OUTFLOW"])
+                t8.attrs["pearson_r"] = round(r, 3)
+                t8.attrs["pearson_p"] = round(p, 3)
+                print(f"\n  >> CORRELATION: Pearson r = {r:.3f}, p = {p:.3f}")
+                if p < 0.05:
+                    print(f"     Statistically significant at 5% level")
+                else:
+                    print(f"     Not significant (p > 0.05) -- small sample ({len(t8)} provinces)")
+            except Exception:
+                pass
+
+            # Also try with mobility intensity
+            t8_valid = t8.dropna(subset=["MOBILITY_INTENSITY"])
+            if len(t8_valid) >= 3:
+                try:
+                    r2, p2 = scipy_stats.pearsonr(t8_valid["STEM_LQ_COMPOSITE"],
+                                                   t8_valid["MOBILITY_INTENSITY"])
+                    print(f"     INTENSITY correlation: r = {r2:.3f}, p = {p2:.3f}")
+                except Exception:
+                    pass
+
+        t8.to_csv(os.path.join(out_dir, "table_D1_lq_vs_outflow.csv"), index=False)
+        tables["D1_LQ_vs_Outflow"] = t8
+        print(f"  [OK] table_D1_lq_vs_outflow.csv")
+        print(t8.to_string(index=False))
+
+    # -----------------------------------------------------------------------
+    # TABLE 9: Summary Key Figures
+    # -----------------------------------------------------------------------
+    summary_rows = []
+
+    def add_metric(metric, value, unit="", source="", year="", caveat=""):
+        summary_rows.append({
+            "METRIC": metric, "VALUE": value, "UNIT": unit,
+            "SOURCE": source, "YEAR": year, "CAVEAT": caveat,
+        })
+
+    if wo is not None and len(wo) > 0:
+        add_metric("WO STEM graduates", int(wo["WO_STEM_GRADS"].iloc[-1]),
+                   "persons", "DUO", str(wo.index[-1]))
+        add_metric("WO STEM share", round(wo["WO_STEM_PCT"].iloc[-1], 1),
+                   "%", "DUO", str(wo.index[-1]))
+    if hbo is not None and len(hbo) > 0:
+        add_metric("HBO STEM graduates", int(hbo["HBO_STEM_GRADS"].iloc[-1]),
+                   "persons", "DUO", str(hbo.index[-1]))
+        add_metric("HBO STEM share", round(hbo["HBO_STEM_PCT"].iloc[-1], 1),
+                   "%", "DUO", str(hbo.index[-1]))
+    if wo is not None and hbo is not None:
+        combined = int(wo["WO_STEM_GRADS"].iloc[-1] + hbo["HBO_STEM_GRADS"].iloc[-1])
+        add_metric("Total STEM graduates (WO+HBO)", combined, "persons", "DUO")
+    if "groningen_lq" in results_b:
+        add_metric("Groningen STEM LQ (province)", results_b["groningen_lq"],
+                   "ratio", "LISA", str(results_b.get("lisa_year", "")),
+                   "1.0 = national average")
+        add_metric("Groningen province STEM rank",
+                   f"{results_b['groningen_rank']}/{results_b['total_regions']}",
+                   "rank", "LISA")
+    if "groningen_corop_lq" in results_b:
+        add_metric("Groningen COROP STEM LQ", results_b["groningen_corop_lq"],
+                   "ratio", "LISA")
+        add_metric("Groningen COROP STEM rank",
+                   f"{results_b['groningen_corop_rank']}/{results_b['total_corop_regions']}",
+                   "rank", "LISA")
+    if "lisa_stem_pct" in results_b:
+        add_metric("Groningen STEM employment share", round(results_b["lisa_stem_pct"], 1),
+                   "%", "LISA", "", "Includes L10 Zakelijke diensten")
+        add_metric("Groningen total jobs", int(results_b["lisa_total_jobs"]),
+                   "jobs", "LISA")
+    if "yearly_migration" in results_c:
+        mig = results_c["yearly_migration"]
+        add_metric("Avg net migration 25-30", round(mig["NET_25_30"].mean()),
+                   "persons/year", "CBS", f"{mig.iloc[0, 0]}-{mig.iloc[-1, 0]}",
+                   "All movers, not only graduates")
+
+    if summary_rows:
+        t9 = pd.DataFrame(summary_rows)
+        t9.to_csv(os.path.join(out_dir, "table_SUMMARY_key_figures.csv"), index=False)
+        tables["SUMMARY"] = t9
+        print(f"\n  [OK] table_SUMMARY_key_figures.csv")
+        print(t9.to_string(index=False))
+
+    # -----------------------------------------------------------------------
+    # EXCEL WORKBOOK (all tables as sheets)
+    # -----------------------------------------------------------------------
+    try:
+        xlsx_path = os.path.join(out_dir, "GEMRAMA_all_tables.xlsx")
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for sheet_name, df in tables.items():
+                # Excel sheet names max 31 chars
+                sn = sheet_name[:31]
+                df.to_csv  # ensure it's a DataFrame
+                df.to_excel(writer, sheet_name=sn, index=True)
+        print(f"\n  [OK] GEMRAMA_all_tables.xlsx ({len(tables)} sheets)")
+    except Exception as e:
+        print(f"  [WARNING] Could not write Excel workbook: {e}")
+
+    # -----------------------------------------------------------------------
+    # CHARTS
+    # -----------------------------------------------------------------------
+    if HAS_PLOT:
+        print(f"\n  --- Generating charts ---")
+        plt.style.use("seaborn-v0_8-whitegrid") if "seaborn-v0_8-whitegrid" in plt.style.available else None
+        chart_count = 0
+
+        # CHART 1: STEM graduates trend
+        if "A1_STEM_Graduates" in tables:
+            try:
+                fig, ax1 = plt.subplots(figsize=(10, 6))
+                t = tables["A1_STEM_Graduates"]
+                x = t.index.astype(str)
+                width = 0.35
+                x_pos = np.arange(len(x))
+
+                bars1 = ax1.bar(x_pos - width/2, t.get("WO_STEM_GRADS", pd.Series(dtype=float)),
+                                width, label="WO STEM", color="#2196F3")
+                bars2 = ax1.bar(x_pos + width/2, t.get("HBO_STEM_GRADS", pd.Series(dtype=float)),
+                                width, label="HBO STEM", color="#FF9800")
+                ax1.set_xlabel("Year")
+                ax1.set_ylabel("Number of STEM Graduates")
+                ax1.set_xticks(x_pos)
+                ax1.set_xticklabels(x)
+                ax1.legend(loc="upper left")
+
+                if "TOTAL_STEM_PCT" in t.columns:
+                    ax2 = ax1.twinx()
+                    ax2.plot(x_pos, t["TOTAL_STEM_PCT"], "r-o", linewidth=2,
+                             label="STEM % of total")
+                    ax2.set_ylabel("STEM % of Total Graduates")
+                    ax2.legend(loc="upper right")
+
+                ax1.set_title("STEM Graduates from Groningen Institutions (WO + HBO)")
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_A1_stem_graduates_trend.png"), dpi=150)
+                plt.close()
+                chart_count += 1
+                print(f"  [OK] chart_A1_stem_graduates_trend.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart A1 failed: {e}")
+
+        # CHART 2: Province LQ heatmap
+        if "B1_Province_LQ" in tables:
+            try:
+                t = tables["B1_Province_LQ"].copy()
+                lq_cols = [c for c in t.columns if c.startswith("LQ_")]
+                if lq_cols:
+                    plot_data = t.set_index("REGION")[lq_cols]
+                    # Shorten column names
+                    plot_data.columns = [c.replace("LQ_", "").split("_")[0] for c in plot_data.columns]
+
+                    fig, ax = plt.subplots(figsize=(10, 8))
+                    sns.heatmap(plot_data, annot=True, fmt=".2f", cmap="RdYlGn",
+                                center=1.0, linewidths=0.5, ax=ax,
+                                cbar_kws={"label": "Location Quotient"})
+                    ax.set_title(f"STEM Location Quotients by Province (LISA {results_b.get('lisa_year', '')})")
+                    ax.set_ylabel("")
+
+                    # Highlight Groningen
+                    for i, region in enumerate(plot_data.index):
+                        if "Groningen" in str(region):
+                            ax.get_yticklabels()[i].set_weight("bold")
+                            ax.get_yticklabels()[i].set_color("red")
+
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(out_dir, "chart_B1_province_lq_heatmap.png"), dpi=150)
+                    plt.close()
+                    chart_count += 1
+                    print(f"  [OK] chart_B1_province_lq_heatmap.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart B1 failed: {e}")
+
+        # CHART 3: COROP top 20
+        if "B2_COROP_LQ" in tables:
+            try:
+                t = tables["B2_COROP_LQ"].head(20).copy()
+                fig, ax = plt.subplots(figsize=(10, 8))
+                colors = ["#e74c3c" if "Groningen" in str(r) else "#3498db"
+                          for r in t["COROP_REGION"]]
+                ax.barh(range(len(t)), t["STEM_LQ_COMPOSITE"], color=colors)
+                ax.set_yticks(range(len(t)))
+                ax.set_yticklabels(t["COROP_REGION"], fontsize=8)
+                ax.axvline(x=1.0, color="black", linestyle="--", alpha=0.5, label="National avg")
+                ax.set_xlabel("Composite STEM LQ")
+                ax.set_title("Top 20 COROP Regions by STEM Specialization")
+                ax.invert_yaxis()
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_B2_corop_lq_top20.png"), dpi=150)
+                plt.close()
+                chart_count += 1
+                print(f"  [OK] chart_B2_corop_lq_top20.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart B2 failed: {e}")
+
+        # CHART 4: Net migration time series
+        if "C1_Net_Migration" in tables:
+            try:
+                t = tables["C1_Net_Migration"]
+                year_col = t.columns[0]  # first column is year
+                fig, ax = plt.subplots(figsize=(10, 6))
+                if "Net_20_25" in t.columns:
+                    ax.plot(t[year_col].astype(str), t["Net_20_25"], "b-o",
+                            label="Net 20-25 (students)", linewidth=2)
+                if "Net_25_30" in t.columns:
+                    ax.plot(t[year_col].astype(str), t["Net_25_30"], "r-s",
+                            label="Net 25-30 (graduates)", linewidth=2)
+                ax.axhline(y=0, color="black", linestyle="-", alpha=0.3)
+                ax.fill_between(range(len(t)), t.get("Net_25_30", 0), 0,
+                                alpha=0.1, color="red")
+                ax.set_xlabel("Year")
+                ax.set_ylabel("Net Migration (positive = inflow)")
+                ax.set_title("Net Migration Groningen by Age Group")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_C1_net_migration.png"), dpi=150)
+                plt.close()
+                chart_count += 1
+                print(f"  [OK] chart_C1_net_migration.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart C1 failed: {e}")
+
+        # CHART 5: Destination flow bars
+        if "C2_Destinations" in tables:
+            try:
+                t = tables["C2_Destinations"]
+                t = t[t["DESTINATION_PROVINCE"] != "Overig/Onbekend"].head(10)
+                fig, ax = plt.subplots(figsize=(10, 6))
+
+                # Color by STEM LQ if available
+                if "STEM_LQ_COMPOSITE" in t.columns:
+                    norm = plt.Normalize(t["STEM_LQ_COMPOSITE"].min(),
+                                         t["STEM_LQ_COMPOSITE"].max())
+                    colors = plt.cm.RdYlGn(norm(t["STEM_LQ_COMPOSITE"]))
+                else:
+                    colors = "#3498db"
+
+                ax.barh(range(len(t)), t["PCT_OF_TOTAL_OUTFLOW"], color=colors)
+                ax.set_yticks(range(len(t)))
+                ax.set_yticklabels(t["DESTINATION_PROVINCE"])
+                ax.set_xlabel("% of Total Outflow from Groningen")
+                ax.set_title("Where Do People Leaving Groningen Go?")
+                ax.invert_yaxis()
+
+                if "STEM_LQ_COMPOSITE" in t.columns:
+                    sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=norm)
+                    sm.set_array([])
+                    cbar = plt.colorbar(sm, ax=ax)
+                    cbar.set_label("STEM LQ (color)")
+
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_C2_destination_flow.png"), dpi=150)
+                plt.close()
+                chart_count += 1
+                print(f"  [OK] chart_C2_destination_flow.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart C2 failed: {e}")
+
+        # CHART 6: LQ vs Outflow scatter (THE KEY CHART)
+        if "D1_LQ_vs_Outflow" in tables:
+            try:
+                t = tables["D1_LQ_vs_Outflow"]
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.scatter(t["STEM_LQ_COMPOSITE"], t["PCT_OF_TOTAL_OUTFLOW"],
+                           s=100, c="#2196F3", edgecolors="black", zorder=5)
+
+                # Label each point
+                for _, row in t.iterrows():
+                    ax.annotate(row["PROVINCE"],
+                                (row["STEM_LQ_COMPOSITE"], row["PCT_OF_TOTAL_OUTFLOW"]),
+                                textcoords="offset points", xytext=(5, 5), fontsize=8)
+
+                # Trend line
+                if len(t) >= 3:
+                    z = np.polyfit(t["STEM_LQ_COMPOSITE"], t["PCT_OF_TOTAL_OUTFLOW"], 1)
+                    p = np.poly1d(z)
+                    x_line = np.linspace(t["STEM_LQ_COMPOSITE"].min(),
+                                         t["STEM_LQ_COMPOSITE"].max(), 100)
+                    ax.plot(x_line, p(x_line), "r--", alpha=0.5, label="Trend")
+
+                ax.axvline(x=1.0, color="gray", linestyle=":", alpha=0.5,
+                           label="National avg LQ")
+                ax.set_xlabel("STEM Location Quotient (province)")
+                ax.set_ylabel("% of Groningen Outflow to Province")
+                ax.set_title("Do Graduates Move to STEM-Specialized Regions?")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_D1_lq_vs_outflow_scatter.png"), dpi=150)
+                plt.close()
+                chart_count += 1
+                print(f"  [OK] chart_D1_lq_vs_outflow_scatter.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart D1 failed: {e}")
+
+        # CHART 7: Groningen jobs by sector
+        if "B3_Groningen_Jobs" in tables:
+            try:
+                t = tables["B3_Groningen_Jobs"].sort_values("Jobs", ascending=True)
+                fig, ax = plt.subplots(figsize=(10, 7))
+                colors = ["#e74c3c" if s else "#95a5a6" for s in t["Is_STEM"]]
+                ax.barh(range(len(t)), t["Jobs"], color=colors)
+                ax.set_yticks(range(len(t)))
+                ax.set_yticklabels(t["Sector"], fontsize=8)
+                ax.set_xlabel("Number of Jobs")
+                ax.set_title("Employment by Sector in Groningen (LISA)\nRed = STEM sectors")
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_B3_groningen_jobs.png"), dpi=150)
+                plt.close()
+                chart_count += 1
+                print(f"  [OK] chart_B3_groningen_jobs.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart B3 failed: {e}")
+
+        print(f"\n  Generated {chart_count} charts")
+    else:
+        print(f"  [SKIP] Charts -- install matplotlib and seaborn")
+
+    return tables
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -1313,6 +1763,9 @@ def main():
     step8_data_quality(missing, out_dir)
     step10_quality_checks(results_a)
 
+    # NEW: Export clean tables and charts
+    tables = step9_export_tables(results_a, results_b, results_c, results_d, out_dir)
+
     print("\n" + "=" * 60)
     print("=== FINAL STATUS ===")
     print("=" * 60)
@@ -1322,13 +1775,44 @@ def main():
         print(f"  {len(missing)} files missing -- partial analysis")
         print(f"  Missing: {', '.join(missing)}")
 
-    print(f"\n  Output files in: {out_dir}")
-    for fn in ["output_A_stem_pipeline_groningen.csv",
-               "output_B_location_quotients.csv",
-               "output_C_mobility_flows.csv",
-               "output_D_match_analysis.csv",
-               "output_SYNTHESIS.txt",
-               "output_DATA_QUALITY.txt"]:
+    print(f"\n  === OUTPUT FILES IN: {out_dir} ===")
+    print(f"\n  CLEAN TABLES (directly usable in Excel/ArcGIS):")
+    table_files = [
+        ("table_A1_stem_graduates_annual.csv", "STEM grads by year (WO+HBO) -> time series chart"),
+        ("table_A2_gender_wo.csv",             "Gender breakdown by sector -> bar chart"),
+        ("table_B1_province_lq.csv",           "Province LQ -> choropleth map"),
+        ("table_B2_corop_lq.csv",              "COROP LQ -> detailed choropleth map"),
+        ("table_B3_groningen_jobs.csv",         "Groningen jobs by sector -> pie/bar chart"),
+        ("table_C1_net_migration.csv",          "Net migration by age -> time series"),
+        ("table_C2_destination_provinces.csv",  "Where grads go + LQ -> flow map"),
+        ("table_D1_lq_vs_outflow.csv",          "LQ vs outflow correlation -> scatter plot"),
+        ("table_SUMMARY_key_figures.csv",       "All key numbers in one table"),
+        ("GEMRAMA_all_tables.xlsx",             "ALL tables in one Excel workbook"),
+    ]
+    for fn, desc in table_files:
+        fp = os.path.join(out_dir, fn)
+        status = "[OK]" if os.path.isfile(fp) else "[--]"
+        print(f"    {status} {fn}")
+        print(f"         -> {desc}")
+
+    print(f"\n  CHARTS (PNG, ready for StoryMap):")
+    chart_files = [
+        ("chart_A1_stem_graduates_trend.png",   "STEM graduate trend (bar + line)"),
+        ("chart_B1_province_lq_heatmap.png",    "Province LQ heatmap"),
+        ("chart_B2_corop_lq_top20.png",         "Top 20 COROP regions"),
+        ("chart_B3_groningen_jobs.png",          "Groningen sector employment"),
+        ("chart_C1_net_migration.png",           "Net migration time series"),
+        ("chart_C2_destination_flow.png",        "Destination flow bars (colored by LQ)"),
+        ("chart_D1_lq_vs_outflow_scatter.png",   "THE KEY CHART: LQ vs outflow"),
+    ]
+    for fn, desc in chart_files:
+        fp = os.path.join(out_dir, fn)
+        status = "[OK]" if os.path.isfile(fp) else "[--]"
+        print(f"    {status} {fn}")
+        print(f"         -> {desc}")
+
+    print(f"\n  NARRATIVE:")
+    for fn in ["output_SYNTHESIS.txt", "output_DATA_QUALITY.txt"]:
         fp = os.path.join(out_dir, fn)
         print(f"    {'[OK]' if os.path.isfile(fp) else '[--]'} {fn}")
 
