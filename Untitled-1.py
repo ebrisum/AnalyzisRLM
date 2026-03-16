@@ -695,6 +695,13 @@ def step4_analysis_b(loaded, out_dir):
             print(f"\n  >> Groningen: rank #{gron_rank}/{len(lq_df)}, "
                   f"composite STEM LQ = {gron_lq}")
 
+        # National STEM employment share (for gravity model)
+        stem_national = lisa_latest[lisa_latest["IS_STEM"]]["Banen"].sum()
+        total_national_all = lisa_latest["Banen"].sum()
+        if total_national_all > 0:
+            results_b["national_stem_share"] = round(stem_national / total_national_all, 4)
+            print(f"\n  National STEM share: {results_b['national_stem_share']:.1%}")
+
         # Also do COROP-level analysis
         if "COROP_gebied" in lisa_latest.columns:
             print(f"\n  --- COROP-level LQ analysis ---")
@@ -1274,13 +1281,447 @@ def step10_quality_checks(results_a):
 
 
 # ---------------------------------------------------------------------------
+# STEP 11: GRAVITY MODEL -- Predict STEM graduate destination probabilities
+# ---------------------------------------------------------------------------
+
+# Driving distances from Groningen (km) to province capitals / economic centres
+DISTANCE_FROM_GRONINGEN = {
+    "Groningen": 0, "Friesland": 60, "Drenthe": 45, "Overijssel": 115,
+    "Flevoland": 140, "Gelderland": 175, "Utrecht": 185, "Noord-Holland": 195,
+    "Zuid-Holland": 230, "Zeeland": 310, "Noord-Brabant": 260, "Limburg": 300,
+}
+
+
+def step11_gravity_model(results_a, results_b, results_c, out_dir):
+    """
+    Gravity model: predicts probability of a Groningen STEM graduate
+    settling in each province, based on:
+      - STEM jobs in destination (pull factor)
+      - Distance from Groningen (friction)
+      - Province population / labour market size (mass)
+      - Observed migration flows (calibration)
+
+    Outputs map-ready CSV + regression diagnostics + STEM occupation estimates.
+    """
+    print("\n" + "=" * 60)
+    print("=== STEP 11: GRAVITY MODEL -- STEM GRADUATE DESTINATIONS ===")
+    print("=" * 60)
+
+    results_grav = {}
+
+    # Check prerequisites
+    if "lq" not in results_b:
+        print("  [SKIP] No LQ data available")
+        return results_grav
+    lq_df = results_b["lq"].copy()
+
+    # -----------------------------------------------------------------------
+    # 1. Build province-level feature table
+    # -----------------------------------------------------------------------
+    print("\n  --- Building province feature table ---")
+
+    provinces = []
+    for _, row in lq_df.iterrows():
+        prov = row["REGION"]
+        if prov == "Groningen":
+            continue  # exclude origin
+        if prov not in DISTANCE_FROM_GRONINGEN:
+            continue
+
+        d = {
+            "PROVINCE": prov,
+            "DISTANCE_KM": DISTANCE_FROM_GRONINGEN[prov],
+            "POPULATION": PROVINCE_POP.get(prov, np.nan),
+            "TOTAL_JOBS": row["TOTAL_JOBS"],
+            "STEM_LQ": row["STEM_LQ_COMPOSITE"],
+        }
+
+        # Compute STEM jobs (total jobs * national STEM share * LQ)
+        # National STEM share from LISA
+        national_stem_share = results_b.get("national_stem_share", 0.15)
+        d["STEM_JOBS_EST"] = int(row["TOTAL_JOBS"] * national_stem_share * row["STEM_LQ_COMPOSITE"])
+
+        # Individual LQ columns
+        for col in row.index:
+            if col.startswith("LQ_"):
+                d[col] = row[col]
+
+        provinces.append(d)
+
+    feat = pd.DataFrame(provinces)
+    if len(feat) < 3:
+        print("  [SKIP] Not enough provinces for regression")
+        return results_grav
+
+    # Add log-transformed features for gravity model
+    feat["LOG_DISTANCE"] = np.log(feat["DISTANCE_KM"].clip(lower=1))
+    feat["LOG_JOBS"] = np.log(feat["TOTAL_JOBS"].clip(lower=1))
+    feat["LOG_STEM_JOBS"] = np.log(feat["STEM_JOBS_EST"].clip(lower=1))
+    feat["LOG_POP"] = np.log(feat["POPULATION"].clip(lower=1))
+
+    print(f"  Provinces in model: {len(feat)}")
+    print(feat[["PROVINCE", "DISTANCE_KM", "TOTAL_JOBS", "STEM_LQ", "STEM_JOBS_EST"]].to_string(index=False))
+
+    # -----------------------------------------------------------------------
+    # 2. Merge observed flows (if available)
+    # -----------------------------------------------------------------------
+    has_observed = False
+    if "province_destinations" in results_c:
+        obs = results_c["province_destinations"].copy()
+        obs = obs.rename(columns={"DESTINATION_PROVINCE": "PROVINCE"})
+        feat = feat.merge(obs[["PROVINCE", "PERSONS_FROM_GRONINGEN", "PCT_OF_TOTAL_OUTFLOW"]],
+                          on="PROVINCE", how="left")
+        feat["PERSONS_FROM_GRONINGEN"] = feat["PERSONS_FROM_GRONINGEN"].fillna(0)
+        feat["PCT_OF_TOTAL_OUTFLOW"] = feat["PCT_OF_TOTAL_OUTFLOW"].fillna(0)
+        has_observed = feat["PERSONS_FROM_GRONINGEN"].sum() > 0
+        if has_observed:
+            feat["LOG_FLOW"] = np.log(feat["PERSONS_FROM_GRONINGEN"].clip(lower=1))
+            print(f"\n  Observed flows available -- will calibrate model")
+
+    # -----------------------------------------------------------------------
+    # 3. Gravity model (log-linear regression)
+    # -----------------------------------------------------------------------
+    print(f"\n  --- Gravity Model Regression ---")
+    print(f"  Model: log(Flow) ~ beta1*log(STEM_Jobs) + beta2*log(Distance) + beta3*STEM_LQ")
+
+    from scipy import stats as scipy_stats
+
+    # --- Model A: Pure gravity (uncalibrated, theoretical) ---
+    # Flow_ij proportional to (STEM_Jobs_j ^ alpha) / (Distance_ij ^ beta)
+    # Standard gravity: alpha ~ 1, beta ~ 1-2
+
+    # Theoretical prediction (no calibration needed)
+    feat["GRAVITY_RAW"] = feat["STEM_JOBS_EST"] / (feat["DISTANCE_KM"] ** 1.5)
+    feat["GRAVITY_PROB_THEORY"] = (feat["GRAVITY_RAW"] / feat["GRAVITY_RAW"].sum() * 100).round(2)
+
+    print(f"\n  Theoretical gravity model (alpha=1, beta=1.5):")
+    print(feat[["PROVINCE", "STEM_JOBS_EST", "DISTANCE_KM", "GRAVITY_PROB_THEORY"]].to_string(index=False))
+
+    # --- Model B: Calibrated (if observed data exists) ---
+    regression_results = {}
+    if has_observed and feat["PERSONS_FROM_GRONINGEN"].gt(0).sum() >= 3:
+        valid = feat[feat["PERSONS_FROM_GRONINGEN"] > 0].copy()
+
+        # OLS: log(flow) = a + b1*log(stem_jobs) + b2*log(distance) + b3*stem_lq
+        Y = valid["LOG_FLOW"].values
+        X_vars = valid[["LOG_STEM_JOBS", "LOG_DISTANCE", "STEM_LQ"]].values
+        X_with_const = np.column_stack([np.ones(len(Y)), X_vars])
+
+        try:
+            # OLS via numpy
+            betas, residuals, rank, sv = np.linalg.lstsq(X_with_const, Y, rcond=None)
+            Y_pred = X_with_const @ betas
+            ss_res = np.sum((Y - Y_pred) ** 2)
+            ss_tot = np.sum((Y - Y.mean()) ** 2)
+            r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+            n = len(Y)
+            k = X_with_const.shape[1]
+            adj_r_squared = 1 - (1 - r_squared) * (n - 1) / (n - k - 1) if n > k + 1 else r_squared
+
+            beta_names = ["Intercept", "log(STEM_Jobs)", "log(Distance)", "STEM_LQ"]
+            print(f"\n  Calibrated regression results:")
+            print(f"  {'Variable':<20} {'Coefficient':>12}")
+            print(f"  {'-'*32}")
+            for name, b in zip(beta_names, betas):
+                print(f"  {name:<20} {b:>12.4f}")
+                regression_results[name] = round(b, 4)
+            print(f"  R-squared:         {r_squared:.4f}")
+            print(f"  Adj R-squared:     {adj_r_squared:.4f}")
+            print(f"  N observations:    {n}")
+
+            regression_results["R_squared"] = round(r_squared, 4)
+            regression_results["Adj_R_squared"] = round(adj_r_squared, 4)
+            regression_results["N"] = n
+
+            # Distance decay interpretation
+            dist_beta = betas[2]
+            print(f"\n  >> Distance decay: beta = {dist_beta:.2f}")
+            if dist_beta < -0.5:
+                print(f"     Strong distance friction (graduates prefer nearby regions)")
+            elif dist_beta < 0:
+                print(f"     Moderate distance friction")
+            else:
+                print(f"     Weak/no distance friction (graduates willing to move far)")
+
+            # STEM pull interpretation
+            stem_beta = betas[1]
+            print(f"  >> STEM jobs pull: beta = {stem_beta:.2f}")
+            if stem_beta > 0.5:
+                print(f"     Strong STEM pull (regions with more STEM jobs attract more graduates)")
+            elif stem_beta > 0:
+                print(f"     Moderate STEM pull effect")
+            else:
+                print(f"     No STEM pull effect detected")
+
+            # Calibrated predictions for ALL provinces
+            X_all = np.column_stack([
+                np.ones(len(feat)),
+                feat["LOG_STEM_JOBS"].values,
+                feat["LOG_DISTANCE"].values,
+                feat["STEM_LQ"].values,
+            ])
+            feat["LOG_FLOW_PRED"] = X_all @ betas
+            feat["FLOW_PRED"] = np.exp(feat["LOG_FLOW_PRED"]).round(0).astype(int)
+            feat["GRAVITY_PROB_CALIBRATED"] = (
+                feat["FLOW_PRED"] / feat["FLOW_PRED"].sum() * 100
+            ).round(2)
+
+            print(f"\n  Calibrated destination probabilities:")
+            compare = feat[["PROVINCE", "PCT_OF_TOTAL_OUTFLOW", "GRAVITY_PROB_CALIBRATED",
+                           "GRAVITY_PROB_THEORY"]].copy()
+            compare.columns = ["Province", "Observed_%", "Calibrated_%", "Theory_%"]
+            compare = compare.sort_values("Calibrated_%", ascending=False)
+            print(compare.to_string(index=False))
+
+        except Exception as e:
+            print(f"  [WARNING] Regression failed: {e}")
+            print(f"  Using theoretical model only")
+    else:
+        print(f"  No observed flows for calibration -- using theoretical model")
+
+    # -----------------------------------------------------------------------
+    # 4. STEM occupation probability estimation
+    # -----------------------------------------------------------------------
+    print(f"\n  --- STEM Occupation Probability by Province ---")
+    print(f"  Estimating P(STEM job | settling in province j)")
+
+    # Logic: if a province has STEM LQ > 1, graduates there are more likely
+    # to be in STEM. Scale by LQ as probability multiplier.
+    # Base rate: ~35% of STEM graduates nationally end up in STEM occupations
+    # (from WO-Monitor / HBO-Monitor typical figures)
+    STEM_BASE_RATE = 0.35
+
+    feat["P_STEM_JOB"] = (feat["STEM_LQ"] * STEM_BASE_RATE).clip(upper=0.90).round(3)
+    feat["P_STEM_JOB_PCT"] = (feat["P_STEM_JOB"] * 100).round(1)
+
+    # Expected STEM graduates per province
+    # Total STEM grads from Groningen
+    total_stem_grads = 0
+    wo = results_a.get("WO_yearly")
+    hbo = results_a.get("HBO_yearly")
+    if wo is not None and "WO_STEM_GRADS" in wo.columns:
+        total_stem_grads += wo["WO_STEM_GRADS"].iloc[-1]
+    if hbo is not None and "HBO_STEM_GRADS" in hbo.columns:
+        total_stem_grads += hbo["HBO_STEM_GRADS"].iloc[-1]
+    total_stem_grads = int(total_stem_grads)
+
+    if total_stem_grads > 0:
+        # Use calibrated probabilities if available, else theoretical
+        prob_col = "GRAVITY_PROB_CALIBRATED" if "GRAVITY_PROB_CALIBRATED" in feat.columns else "GRAVITY_PROB_THEORY"
+        feat["EST_STEM_GRADS_ARRIVING"] = (feat[prob_col] / 100 * total_stem_grads).round(0).astype(int)
+        feat["EST_IN_STEM_OCCUPATION"] = (feat["EST_STEM_GRADS_ARRIVING"] * feat["P_STEM_JOB"]).round(0).astype(int)
+        feat["EST_IN_NON_STEM"] = feat["EST_STEM_GRADS_ARRIVING"] - feat["EST_IN_STEM_OCCUPATION"]
+        print(f"\n  Based on {total_stem_grads} STEM graduates per year from Groningen:")
+    else:
+        print(f"  [NOTE] No graduate count available; showing proportions only")
+
+    # -----------------------------------------------------------------------
+    # 5. Build final map-ready output
+    # -----------------------------------------------------------------------
+    print(f"\n  --- MAP-READY OUTPUT ---")
+
+    # Select and order columns for the map table
+    map_cols = ["PROVINCE", "DISTANCE_KM", "POPULATION", "TOTAL_JOBS",
+                "STEM_JOBS_EST", "STEM_LQ"]
+
+    # Add individual LQ columns
+    lq_cols = [c for c in feat.columns if c.startswith("LQ_")]
+    map_cols.extend(sorted(lq_cols))
+
+    map_cols.append("GRAVITY_PROB_THEORY")
+    if "GRAVITY_PROB_CALIBRATED" in feat.columns:
+        map_cols.append("GRAVITY_PROB_CALIBRATED")
+    if "PCT_OF_TOTAL_OUTFLOW" in feat.columns:
+        map_cols.append("PCT_OF_TOTAL_OUTFLOW")
+    map_cols.extend(["P_STEM_JOB_PCT"])
+    if "EST_STEM_GRADS_ARRIVING" in feat.columns:
+        map_cols.extend(["EST_STEM_GRADS_ARRIVING", "EST_IN_STEM_OCCUPATION", "EST_IN_NON_STEM"])
+
+    map_cols = [c for c in map_cols if c in feat.columns]
+    map_df = feat[map_cols].sort_values(
+        "GRAVITY_PROB_CALIBRATED" if "GRAVITY_PROB_CALIBRATED" in feat.columns else "GRAVITY_PROB_THEORY",
+        ascending=False
+    ).reset_index(drop=True)
+    map_df.index += 1
+    map_df.index.name = "RANK"
+
+    # Add province centroids for direct map plotting (lat/lon)
+    PROVINCE_CENTROIDS = {
+        "Groningen": (53.22, 6.57), "Friesland": (53.16, 5.78),
+        "Drenthe": (52.95, 6.62), "Overijssel": (52.44, 6.50),
+        "Flevoland": (52.53, 5.47), "Gelderland": (52.05, 5.87),
+        "Utrecht": (52.09, 5.11), "Noord-Holland": (52.67, 4.81),
+        "Zuid-Holland": (52.03, 4.49), "Zeeland": (51.49, 3.83),
+        "Noord-Brabant": (51.57, 5.14), "Limburg": (51.21, 5.94),
+    }
+    map_df["LAT"] = map_df["PROVINCE"].map(lambda p: PROVINCE_CENTROIDS.get(p, (np.nan,))[0])
+    map_df["LON"] = map_df["PROVINCE"].map(lambda p: PROVINCE_CENTROIDS.get(p, (np.nan, np.nan))[1])
+
+    print(f"\n  Map-ready table (sorted by predicted flow probability):")
+    display_cols = ["PROVINCE", "STEM_LQ", "DISTANCE_KM"]
+    if "GRAVITY_PROB_CALIBRATED" in map_df.columns:
+        display_cols.append("GRAVITY_PROB_CALIBRATED")
+    display_cols.append("GRAVITY_PROB_THEORY")
+    if "PCT_OF_TOTAL_OUTFLOW" in map_df.columns:
+        display_cols.append("PCT_OF_TOTAL_OUTFLOW")
+    display_cols.append("P_STEM_JOB_PCT")
+    if "EST_STEM_GRADS_ARRIVING" in map_df.columns:
+        display_cols.extend(["EST_STEM_GRADS_ARRIVING", "EST_IN_STEM_OCCUPATION"])
+    print(map_df[display_cols].to_string())
+
+    # Save
+    map_path = os.path.join(out_dir, "table_E1_gravity_model_map.csv")
+    map_df.to_csv(map_path)
+    print(f"\n  [OK] {map_path}")
+
+    results_grav["map_table"] = map_df
+    results_grav["feature_table"] = feat
+    results_grav["regression"] = regression_results
+
+    # Save regression summary
+    if regression_results:
+        reg_df = pd.DataFrame([
+            {"Variable": k, "Value": v} for k, v in regression_results.items()
+        ])
+        reg_path = os.path.join(out_dir, "table_E2_regression_coefficients.csv")
+        reg_df.to_csv(reg_path, index=False)
+        print(f"  [OK] {reg_path}")
+        results_grav["regression_df"] = reg_df
+
+    # -----------------------------------------------------------------------
+    # 6. Charts
+    # -----------------------------------------------------------------------
+    if HAS_PLOT:
+        # Chart E1: Gravity model scatter (predicted vs observed)
+        if has_observed and "GRAVITY_PROB_CALIBRATED" in feat.columns:
+            try:
+                fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+                # Left: Predicted vs Observed
+                ax = axes[0]
+                valid = feat[feat["PCT_OF_TOTAL_OUTFLOW"] > 0]
+                ax.scatter(valid["PCT_OF_TOTAL_OUTFLOW"], valid["GRAVITY_PROB_CALIBRATED"],
+                           s=100, c="#2196F3", edgecolors="black", zorder=5)
+                for _, row in valid.iterrows():
+                    ax.annotate(row["PROVINCE"],
+                                (row["PCT_OF_TOTAL_OUTFLOW"], row["GRAVITY_PROB_CALIBRATED"]),
+                                textcoords="offset points", xytext=(5, 5), fontsize=8)
+                max_val = max(valid["PCT_OF_TOTAL_OUTFLOW"].max(),
+                              valid["GRAVITY_PROB_CALIBRATED"].max())
+                ax.plot([0, max_val * 1.1], [0, max_val * 1.1], "r--", alpha=0.4,
+                        label="Perfect prediction")
+                ax.set_xlabel("Observed % of Outflow")
+                ax.set_ylabel("Predicted % of Outflow (Gravity Model)")
+                ax.set_title("Model Fit: Predicted vs Observed")
+                ax.legend()
+
+                # Right: Distance decay
+                ax2 = axes[1]
+                ax2.scatter(feat["DISTANCE_KM"], feat["GRAVITY_PROB_CALIBRATED"],
+                            s=feat["STEM_LQ"] * 80, c=feat["STEM_LQ"],
+                            cmap="RdYlGn", edgecolors="black", zorder=5)
+                for _, row in feat.iterrows():
+                    ax2.annotate(row["PROVINCE"],
+                                 (row["DISTANCE_KM"], row["GRAVITY_PROB_CALIBRATED"]),
+                                 textcoords="offset points", xytext=(3, 3), fontsize=7)
+                ax2.set_xlabel("Distance from Groningen (km)")
+                ax2.set_ylabel("Predicted Flow %")
+                ax2.set_title("Distance Decay (bubble size = STEM LQ)")
+                sm = plt.cm.ScalarMappable(cmap="RdYlGn",
+                                           norm=plt.Normalize(feat["STEM_LQ"].min(),
+                                                              feat["STEM_LQ"].max()))
+                sm.set_array([])
+                plt.colorbar(sm, ax=ax2, label="STEM LQ")
+
+                plt.suptitle("Gravity Model: Where Do Groningen STEM Graduates Go?", fontsize=13)
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_E1_gravity_model.png"), dpi=150)
+                plt.close()
+                print(f"  [OK] chart_E1_gravity_model.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart E1 failed: {e}")
+
+        # Chart E2: Map-style bubble plot (lat/lon)
+        try:
+            fig, ax = plt.subplots(figsize=(10, 10))
+            prob_col = "GRAVITY_PROB_CALIBRATED" if "GRAVITY_PROB_CALIBRATED" in map_df.columns else "GRAVITY_PROB_THEORY"
+
+            # Plot Groningen as origin
+            gron_lat, gron_lon = PROVINCE_CENTROIDS["Groningen"]
+            ax.scatter([gron_lon], [gron_lat], s=300, c="red", marker="*",
+                       zorder=10, label="Groningen (origin)")
+            ax.annotate("GRONINGEN", (gron_lon, gron_lat),
+                        textcoords="offset points", xytext=(10, 10),
+                        fontsize=10, fontweight="bold", color="red")
+
+            # Plot destinations as bubbles
+            scatter = ax.scatter(
+                map_df["LON"], map_df["LAT"],
+                s=map_df[prob_col] * 30,  # size = probability
+                c=map_df["P_STEM_JOB_PCT"],  # color = STEM job probability
+                cmap="RdYlGn", edgecolors="black", alpha=0.7, zorder=5
+            )
+            for _, row in map_df.iterrows():
+                label = f"{row['PROVINCE']}\n{row[prob_col]:.1f}%"
+                ax.annotate(label, (row["LON"], row["LAT"]),
+                            textcoords="offset points", xytext=(8, -5), fontsize=7)
+
+                # Draw flow line from Groningen
+                ax.plot([gron_lon, row["LON"]], [gron_lat, row["LAT"]],
+                        "b-", alpha=row[prob_col] / 100 * 2, linewidth=row[prob_col] / 5)
+
+            plt.colorbar(scatter, label="P(STEM occupation) %", shrink=0.6)
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+            ax.set_title(f"Predicted STEM Graduate Flows from Groningen\n"
+                         f"Bubble size = flow probability, Color = STEM occupation chance")
+            ax.legend(loc="lower left")
+            ax.set_xlim(3.0, 7.5)
+            ax.set_ylim(50.8, 53.7)
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "chart_E2_flow_map.png"), dpi=150)
+            plt.close()
+            print(f"  [OK] chart_E2_flow_map.png")
+        except Exception as e:
+            print(f"  [WARNING] Chart E2 failed: {e}")
+
+        # Chart E3: STEM occupation breakdown (stacked bar)
+        if "EST_STEM_GRADS_ARRIVING" in feat.columns:
+            try:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                plot_df = feat.sort_values("EST_STEM_GRADS_ARRIVING", ascending=True)
+                ax.barh(range(len(plot_df)), plot_df["EST_IN_STEM_OCCUPATION"],
+                        color="#2196F3", label="In STEM occupation")
+                ax.barh(range(len(plot_df)), plot_df["EST_IN_NON_STEM"],
+                        left=plot_df["EST_IN_STEM_OCCUPATION"],
+                        color="#FF9800", label="In non-STEM occupation")
+                ax.set_yticks(range(len(plot_df)))
+                ax.set_yticklabels(plot_df["PROVINCE"])
+                ax.set_xlabel("Estimated STEM Graduates from Groningen")
+                ax.set_title("Where Do Groningen STEM Graduates End Up?")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, "chart_E3_stem_occupation_breakdown.png"), dpi=150)
+                plt.close()
+                print(f"  [OK] chart_E3_stem_occupation_breakdown.png")
+            except Exception as e:
+                print(f"  [WARNING] Chart E3 failed: {e}")
+
+    return results_grav
+
+
+# ---------------------------------------------------------------------------
 # STEP 9: Clean output tables + charts
 # ---------------------------------------------------------------------------
-def step9_export_tables(results_a, results_b, results_c, results_d, out_dir):
+def step9_export_tables(results_a, results_b, results_c, results_d, out_dir,
+                         results_grav=None):
     """Produce clean, directly usable output tables and charts."""
     print("\n" + "=" * 60)
     print("=== STEP 9: EXPORTING CLEAN TABLES & CHARTS ===")
     print("=" * 60)
+
+    if results_grav is None:
+        results_grav = {}
 
     tables = {}  # name -> DataFrame for Excel workbook
 
@@ -1485,6 +1926,16 @@ def step9_export_tables(results_a, results_b, results_c, results_d, out_dir):
         tables["SUMMARY"] = t9
         print(f"\n  [OK] table_SUMMARY_key_figures.csv")
         print(t9.to_string(index=False))
+
+    # -----------------------------------------------------------------------
+    # Gravity model tables (from step 11)
+    # -----------------------------------------------------------------------
+    if "map_table" in results_grav:
+        tables["E1_Gravity_Map"] = results_grav["map_table"]
+        print(f"  [OK] table_E1_gravity_model_map.csv (from step 11)")
+    if "regression_df" in results_grav:
+        tables["E2_Regression"] = results_grav["regression_df"]
+        print(f"  [OK] table_E2_regression_coefficients.csv (from step 11)")
 
     # -----------------------------------------------------------------------
     # EXCEL WORKBOOK (all tables as sheets)
@@ -1763,8 +2214,12 @@ def main():
     step8_data_quality(missing, out_dir)
     step10_quality_checks(results_a)
 
-    # NEW: Export clean tables and charts
-    tables = step9_export_tables(results_a, results_b, results_c, results_d, out_dir)
+    # Gravity model for STEM destination prediction
+    results_grav = step11_gravity_model(results_a, results_b, results_c, out_dir)
+
+    # Export clean tables and charts
+    tables = step9_export_tables(results_a, results_b, results_c, results_d, out_dir,
+                                 results_grav=results_grav)
 
     print("\n" + "=" * 60)
     print("=== FINAL STATUS ===")
@@ -1786,6 +2241,8 @@ def main():
         ("table_C1_net_migration.csv",          "Net migration by age -> time series"),
         ("table_C2_destination_provinces.csv",  "Where grads go + LQ -> flow map"),
         ("table_D1_lq_vs_outflow.csv",          "LQ vs outflow correlation -> scatter plot"),
+        ("table_E1_gravity_model_map.csv",      "GRAVITY MODEL: predicted flows + STEM job prob -> MAP"),
+        ("table_E2_regression_coefficients.csv", "Regression coefficients for gravity model"),
         ("table_SUMMARY_key_figures.csv",       "All key numbers in one table"),
         ("GEMRAMA_all_tables.xlsx",             "ALL tables in one Excel workbook"),
     ]
@@ -1803,7 +2260,10 @@ def main():
         ("chart_B3_groningen_jobs.png",          "Groningen sector employment"),
         ("chart_C1_net_migration.png",           "Net migration time series"),
         ("chart_C2_destination_flow.png",        "Destination flow bars (colored by LQ)"),
-        ("chart_D1_lq_vs_outflow_scatter.png",   "THE KEY CHART: LQ vs outflow"),
+        ("chart_D1_lq_vs_outflow_scatter.png",   "LQ vs outflow scatter"),
+        ("chart_E1_gravity_model.png",           "Gravity model: predicted vs observed + distance decay"),
+        ("chart_E2_flow_map.png",                "FLOW MAP: bubbles on NL map (lat/lon)"),
+        ("chart_E3_stem_occupation_breakdown.png","STEM vs non-STEM occupation by province"),
     ]
     for fn, desc in chart_files:
         fp = os.path.join(out_dir, fn)
