@@ -14,7 +14,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-DEFAULT_FLOOD_GPKG = r"Flood_Map_for_Planning_Flood_Zones.gpkg"
+DEFAULT_FLOOD_GPKG = r"C:\Users\NL1E9O\Downloads\Flood\Flood_Map_for_Planning_Flood_Zones.gpkg"
 OUTPUT = "flood_risk_map_england.png"
 DPI = 150
 SIMPLIFY_TOLERANCE = 100  # metres – coarser = faster
